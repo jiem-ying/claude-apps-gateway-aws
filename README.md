@@ -85,14 +85,15 @@ this directory into its own repo and deploy it as-is.
 
 ### Pick your path
 
-Three profiles cover ~everything. Answer these three questions about what you
+A handful of profiles cover ~everything. Answer these questions about what you
 already have in your org:
 
 | Do you have… | Domain? | IdP? | OTEL collector? | Private network path? | → Profile |
 |---|---|---|---|---|---|
 | Nothing yet (greenfield) | yes | no | no | no | [`managed-newcognito-collector-vpn.env`](config/managed-newcognito-collector-vpn.env) |
 | An **existing Cognito pool** you want the gateway to attach to | yes | Cognito | BYO HTTPS OTLP | yes (corp VPN/DX/TGW) | [`managed-existingcognito-byotelemetry.env`](config/managed-existingcognito-byotelemetry.env) |
-| Any **other OIDC IdP** (Okta/Entra/Google/Keycloak) | yes | Okta/Entra/… | BYO / off | yes | [`byo-oidc-notelemetry.env`](config/byo-oidc-notelemetry.env) |
+| Any **other OIDC IdP** (Okta/Entra/Google/Keycloak), no telemetry | yes | Okta/Entra/… | off | yes | [`byo-oidc-notelemetry.env`](config/byo-oidc-notelemetry.env) |
+| **BYO OIDC IdP + your own OTLP collector** | yes | Okta/Entra/… | BYO HTTPS OTLP | yes | [`byo-oidc-byotelemetry.env`](config/byo-oidc-byotelemetry.env) |
 | Just want to try it, minimal cost | yes | no | no | yes | [`managed-newcognito-notelemetry.env`](config/managed-newcognito-notelemetry.env) |
 | No public domain (yet) | **no** | any | any | any | [`selfsigned-fallback.env`](config/selfsigned-fallback.env) *(UX friction — see profile notes)* |
 
@@ -134,7 +135,17 @@ Full walkthrough (BYO integration details for each subsystem):
 
 ## Onboarding peers
 
-Once the gateway is running, add a peer in one command:
+> **This section applies only if you deployed the bundled reference AWS Client
+> VPN.** The peer bundle exists to hand someone a ready-to-use VPN profile, so it
+> requires the `claude-gateway-vpn` stack. **If you bring your own network**
+> (corporate VPN / Direct Connect / TGW / peering), skip this — peers reach the
+> gateway over your existing private path, and you onboard them by creating their
+> IdP user and pushing `managed-settings.json` (see
+> [`docs/GUIDE.md`](docs/GUIDE.md#step-6--connect-developer-laptops)). For the
+> network paths themselves, see
+> [`infrastructure/network-access/README.md`](infrastructure/network-access/README.md).
+
+With the reference VPN deployed, add a peer in one command:
 
 ```bash
 ./make-peer-bundle.sh alice alice@example.com
