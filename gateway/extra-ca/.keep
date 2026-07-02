@@ -1,0 +1,2 @@
+# Placeholder so `COPY extra-ca/` works even with no extra CA.
+# build-and-push.sh stages COLLECTOR_CA_PEM here as collector-ca.crt.

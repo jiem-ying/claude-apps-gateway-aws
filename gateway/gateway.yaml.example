@@ -1,0 +1,126 @@
+# Claude Apps Gateway configuration (template).
+#
+# This file is rendered by deploy.sh (placeholder substitution via sed) and passed
+# to the core stack as the GatewayConfigContent parameter, which the task
+# definition injects into the container as GATEWAY_CONFIG_CONTENT. Secrets stay as
+# ${VAR} so the gateway expands them at boot from ECS-injected secret env vars —
+# the rendered YAML is non-secret and the secrets never leave Secrets Manager.
+#
+# Placeholders rendered at deploy time (substituted by deploy.sh):
+#   __PUBLIC_URL__       https origin of the internal ALB (private DNS name)
+#   __VPC_CIDR__         gateway VPC CIDR, for trusted_proxies
+#   __OIDC_ISSUER__      e.g. https://cognito-idp.<region>.amazonaws.com/<poolId>
+#   __OIDC_CLIENT_ID__   confidential OIDC web client id
+#   __ALLOWED_DOMAINS__  comma-less YAML list, e.g. [example.com]
+#   __GROUPS_CLAIM__     IdP groups claim (Cognito: cognito:groups)
+#   __BEDROCK_REGION__   e.g. us-east-1
+#   __TELEMETRY_BLOCK__  rendered telemetry section, or empty (no hard dependency)
+#
+# Secret env vars expanded by the gateway (injected by ECS from Secrets Manager):
+#   OIDC_CLIENT_SECRET, GATEWAY_JWT_SECRET, GATEWAY_POSTGRES_URL
+
+listen:
+  host: 0.0.0.0
+  port: 8080
+  # Behind a TLS-terminating ALB. Used to build the IdP redirect_uri, the OAuth
+  # discovery doc, and (when telemetry is on) the OTLP endpoint pushed to clients.
+  public_url: __PUBLIC_URL__
+  # Trust X-Forwarded-For only from the ALB (inside the VPC) so per-IP rate
+  # limits and audit records show the real client IP.
+  trusted_proxies:
+    - __VPC_CIDR__
+
+oidc:
+  issuer: __OIDC_ISSUER__              # must serve /.well-known/openid-configuration
+  client_id: __OIDC_CLIENT_ID__
+  client_secret: ${OIDC_CLIENT_SECRET}
+  allowed_email_domains: __ALLOWED_DOMAINS__
+  # Cognito's id_token can omit email/groups; serve them from userinfo.
+  userinfo_fallback: true
+  # IdP-specific groups claim. Cognito emits cognito:groups; Okta/custom = groups;
+  # Entra may use roles. Parameterized so any OIDC IdP works.
+  groups_claim: __GROUPS_CLAIM__
+  # Cognito's app-client token endpoint rejects the offline_access scope, so we
+  # omit it and lengthen the session TTL instead (see session.ttl_hours).
+  scopes:
+    - openid
+    - email
+    - profile
+
+session:
+  jwt_secret: ${GATEWAY_JWT_SECRET}    # openssl rand -base64 32; rotate via array
+  # No refresh token (offline_access dropped for Cognito) ⇒ raise TTL so devs
+  # don't re-login hourly. Trade-off: deprovision latency up to this many hours.
+  ttl_hours: 8
+
+store:
+  postgres_url: ${GATEWAY_POSTGRES_URL}  # includes ?sslmode=require
+
+upstreams:
+  - provider: bedrock
+    region: __BEDROCK_REGION__
+    auth: {}                           # ECS task role (AWS default credential chain)
+
+# MODEL CATALOG.
+#
+# In US regions, the built-in catalog maps claude-* to us.anthropic.* for you:
+#     auto_include_builtin_models: true   # (and delete the models: block below)
+#
+# Outside the US (e.g. APAC), the built-in catalog does NOT apply — disable it and
+# pin your region's CRIS inference-profile IDs explicitly. List the ACTIVE ones
+# with: aws bedrock list-inference-profiles --region <region>
+#
+# IMPORTANT: `id:` must match the model string the Claude Code CLI actually sends,
+# which is the fully-qualified `global.anthropic.*` (or `us.anthropic.*`) id — NOT
+# a short alias. If it doesn't match, the gateway rejects with "not in the
+# operator's model allowlist". `upstream_model.bedrock` is the ACTIVE Bedrock
+# inference profile the gateway invokes; here we map the global ids 1:1 to the
+# global.* cross-region profiles. This catalog is REGION-OPINIONATED — the
+# global.* profiles suit APAC deployments; in us-east-1 / us-west-2 you may prefer
+# the us.anthropic.* profiles, or simply set auto_include_builtin_models: true and
+# delete the explicit list. Confirm the ids with:
+#   aws bedrock list-inference-profiles --region <your-region>
+auto_include_builtin_models: false
+models:
+  # Full-qualified global.anthropic.* IDs (what older CLI versions and
+  # explicit --model invocations send). Each maps 1:1 to the ACTIVE
+  # cross-region Bedrock inference profile.
+  - id: global.anthropic.claude-opus-4-6-v1
+    upstream_model: {bedrock: global.anthropic.claude-opus-4-6-v1}
+  - id: global.anthropic.claude-opus-4-7
+    upstream_model: {bedrock: global.anthropic.claude-opus-4-7}
+  - id: global.anthropic.claude-opus-4-8
+    upstream_model: {bedrock: global.anthropic.claude-opus-4-8}
+  - id: global.anthropic.claude-sonnet-4-6
+    upstream_model: {bedrock: global.anthropic.claude-sonnet-4-6}
+  - id: global.anthropic.claude-sonnet-5
+    upstream_model: {bedrock: global.anthropic.claude-sonnet-5}
+  - id: global.anthropic.claude-haiku-4-5-20251001-v1:0
+    upstream_model: {bedrock: global.anthropic.claude-haiku-4-5-20251001-v1:0}
+  # Fable 5 requires an account-level Bedrock data-retention configuration.
+  # Without it, requests fail with "upstream rejected the request". Remove
+  # this entry if your account isn't approved for the model's retention mode.
+  - id: global.anthropic.claude-fable-5
+    upstream_model: {bedrock: global.anthropic.claude-fable-5}
+  # Short-alias forms the modern CLI (≥2.1.198) sends after /model picker
+  # selection. Route each to the same global.* Bedrock profile.
+  - id: claude-opus-4-6
+    upstream_model: {bedrock: global.anthropic.claude-opus-4-6-v1}
+  - id: claude-opus-4-7
+    upstream_model: {bedrock: global.anthropic.claude-opus-4-7}
+  - id: claude-opus-4-8
+    upstream_model: {bedrock: global.anthropic.claude-opus-4-8}
+  - id: claude-sonnet-4-6
+    upstream_model: {bedrock: global.anthropic.claude-sonnet-4-6}
+  - id: claude-sonnet-5
+    upstream_model: {bedrock: global.anthropic.claude-sonnet-5}
+  - id: claude-haiku-4-5
+    upstream_model: {bedrock: global.anthropic.claude-haiku-4-5-20251001-v1:0}
+  - id: claude-fable-5
+    upstream_model: {bedrock: global.anthropic.claude-fable-5}
+
+# Telemetry is OPTIONAL. When __TELEMETRY_BLOCK__ renders empty, the gateway
+# forwards no telemetry and works fully — no dependency on the observability
+# stack. When a collector endpoint is supplied, it renders a forward_to block
+# that relays OTLP/HTTP metrics (identity-stamped) to your existing collector.
+__TELEMETRY_BLOCK__

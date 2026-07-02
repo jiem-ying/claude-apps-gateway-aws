@@ -1,0 +1,451 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  OPTIONAL self-hosted OTEL collector for the Claude Apps Gateway. ECS Fargate
+  running the AWS Distro for OpenTelemetry (ADOT) collector behind an internal
+  HTTPS ALB (443 -> OTLP/HTTP 4318), exporting metrics to CloudWatch via the
+  awsemf exporter, plus a ready-made CloudWatch dashboard. Deploy this when your
+  org has no third-party observability platform and wants gateway usage metrics
+  in CloudWatch. Deploys INTO the gateway's VPC (so the gateway can reach it
+  privately). Toggle = deploy this stack or don't; the gateway works fine without it.
+
+  TLS has two modes: (A) MANAGED (recommended) — set PublicHostedZoneId + DomainName,
+  the stack creates a DNS-validated PUBLIC ACM cert the stock gateway image trusts
+  automatically (no CA baking). (B) BYO/self-signed — pass CertificateArn +
+  PrivateHostedZoneId + CollectorHostname; the gateway image must trust that CA
+  (make-collector-cert.sh + COLLECTOR_CA_PEM). See observability/README.md.
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        # W1030: CertificateArn defaults to "" (managed mode) and is only used in
+        # the BYO branch of the listener !If, where it IS a valid ARN.
+        - W1030
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Gateway VPC id (VpcId output of the gateway stack) — collector runs here so the gateway can reach it privately.
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: First private subnet of the gateway VPC.
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second private subnet of the gateway VPC.
+  # --- TLS / DNS: choose ONE of two modes (same as the gateway stack) ---
+  # (A) MANAGED (recommended): set PublicHostedZoneId + DomainName, leave CertificateArn empty.
+  #     Creates a DNS-validated PUBLIC ACM cert + public alias to the internal ALB. The gateway
+  #     (stock image, no baked CA) trusts it automatically.
+  # (B) BYO/self-signed: set CertificateArn + PrivateHostedZoneId + CollectorHostname.
+  DomainName:
+    Type: String
+    Default: ""
+    Description: (Managed mode) Public FQDN for the collector, e.g. claude-otel.example.com. Must be within PublicHostedZoneId's zone. Aliases the internal ALB (resolves to private IPs).
+  PublicHostedZoneId:
+    Type: String
+    Default: ""
+    Description: (Managed mode) Public Route53 hosted zone id authoritative for DomainName. MUST be public (a private zone makes ACM validation hang).
+  PrivateHostedZoneId:
+    Type: String
+    Default: ""
+    Description: (BYO/self-signed mode) The gateway stack's private hosted zone id. Leave empty in managed mode.
+  CollectorHostname:
+    Type: String
+    Default: "otel.internal.example.com"
+    Description: (BYO/self-signed mode) Private DNS name for the collector (within the gateway's private hosted zone).
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: (BYO/self-signed mode) ACM cert ARN for CollectorHostname. Leave EMPTY to use managed mode (PublicHostedZoneId + DomainName). If set, takes precedence.
+  VpcCidr:
+    Type: String
+    Default: "10.20.0.0/16"
+    Description: Gateway VPC CIDR — allowed to reach the collector ALB on 443 (gateway tasks forward OTLP from within the VPC).
+  CollectorImage:
+    Type: String
+    Default: "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+    Description: ADOT collector image. Pin a digest/tag for production.
+  MetricsNamespace:
+    Type: String
+    Default: "ClaudeGateway"
+    Description: CloudWatch metrics namespace for gateway usage metrics.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: Retention for the collector's CloudWatch metrics log group.
+
+Conditions:
+  HasCertificateArn: !Not [!Equals [!Ref CertificateArn, ""]]
+  ManagedCertMode: !And
+    - !Not [!Equals [!Ref PublicHostedZoneId, ""]]
+    - !Not [!Equals [!Ref DomainName, ""]]
+    - !Not [!Condition HasCertificateArn]
+  CreatePrivateRecord: !Not [!Condition ManagedCertMode]
+
+Resources:
+  # --------------------------------------------- TLS cert (managed mode only)
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: ManagedCertMode
+    Properties:
+      DomainName: !Ref DomainName
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref PublicHostedZoneId
+      ValidationMethod: DNS
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-certificate" }
+
+  # ------------------------------------------------------- public DNS (managed)
+  # Alias in the PUBLIC zone to the INTERNAL ALB (resolves to private IPs). The
+  # gateway resolves this public name via NAT egress and reaches it in-VPC.
+  PublicDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: ManagedCertMode
+    Properties:
+      HostedZoneId: !Ref PublicHostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+  # ----------------------------------------- private DNS (BYO/self-signed mode)
+  CollectorDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: CreatePrivateRecord
+    Properties:
+      HostedZoneId: !Ref PrivateHostedZoneId
+      Name: !Ref CollectorHostname
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+  # ------------------------------------------------------------- security groups
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} collector ALB - 443 from the gateway"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: HTTPS from within the VPC (gateway forwards OTLP here)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-alb-sg" }
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} collector task - 4318 from ALB only"
+      VpcId: !Ref VpcId
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-task-sg" }
+
+  TaskIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 4318
+      ToPort: 4318
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: OTLP/HTTP from the collector ALB
+
+  # The ALB target group health-checks the ADOT health_check extension on 13133;
+  # the ALB must be able to reach it or ECS drains every task (circuit breaker).
+  TaskHealthIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 13133
+      ToPort: 13133
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: ADOT health_check port from the collector ALB
+
+  # ----------------------------------------------------------------------- ALB
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-alb" }
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 4318
+      Protocol: HTTP
+      TargetType: ip
+      # ADOT health_check extension listens on 13133.
+      HealthCheckPort: "13133"
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !If [ManagedCertMode, !Ref Certificate, !Ref CertificateArn]
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ----------------------------------------------------------------- config SSM
+  # ADOT config: OTLP/HTTP receiver -> awsemf (CloudWatch). The gateway stamps
+  # identity as OTLP resource attributes (user.email, user.id, user.groups), so
+  # resource_to_telemetry_conversion turns them into CloudWatch dimensions with
+  # no header-extraction processors needed.
+  CollectorConfigParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${AWS::StackName}/collector-config"
+      Type: String
+      Description: ADOT collector config (OTLP -> awsemf CloudWatch).
+      Value: !Sub |
+        extensions:
+          health_check:
+            endpoint: 0.0.0.0:13133
+            path: /
+
+        receivers:
+          otlp:
+            protocols:
+              http:
+                endpoint: 0.0.0.0:4318
+
+        processors:
+          batch/metrics:
+            timeout: 60s
+          resource:
+            attributes:
+              - key: aws.account_id
+                value: "${AWS::AccountId}"
+                action: insert
+              - key: deployment.environment
+                value: "gateway"
+                action: insert
+
+        exporters:
+          awsemf:
+            namespace: ${MetricsNamespace}
+            log_group_name: /aws/claude-gateway/metrics
+            region: ${AWS::Region}
+            output_destination: cloudwatch
+            log_retention: ${LogRetentionDays}
+            resource_to_telemetry_conversion:
+              enabled: true
+            metric_declarations:
+              - dimensions: [[OTelLib]]
+                metric_name_selectors: [".*"]
+              - dimensions: [[user.email, OTelLib]]
+                metric_name_selectors: ["claude_code.token.usage", "claude_code.cost.usage"]
+              - dimensions: [[model, OTelLib]]
+                metric_name_selectors: [".*"]
+              - dimensions: [[type, OTelLib]]
+                metric_name_selectors: ["claude_code.token.usage"]
+
+        service:
+          extensions: [health_check]
+          telemetry:
+            logs:
+              level: info
+              encoding: json
+              output_paths: [stdout]
+          pipelines:
+            metrics:
+              receivers: [otlp]
+              processors: [resource, batch/metrics]
+              exporters: [awsemf]
+
+  # ------------------------------------------------------------------- IAM roles
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Policies:
+        - PolicyName: read-config
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameters, ssm:GetParameter]
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cloudwatch-emf
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # awsemf exporter writes metrics + backing log group/streams.
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: "*"
+
+  # ----------------------------------------------------------------------- ECS
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${AWS::StackName}-cluster"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${AWS::StackName}-collector"
+      RetentionInDays: !Ref LogRetentionDays
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-collector"
+      Cpu: "512"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: collector
+          Image: !Ref CollectorImage
+          Essential: true
+          PortMappings:
+            - { ContainerPort: 4318, Protocol: tcp }
+            - { ContainerPort: 13133, Protocol: tcp }
+          Secrets:
+            # ADOT reads its config from this env var when set.
+            - Name: AOT_CONFIG_CONTENT
+              ValueFrom: !Ref CollectorConfigParam
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: collector
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: HttpsListener
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: 2
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+      LoadBalancers:
+        - ContainerName: collector
+          ContainerPort: 4318
+          TargetGroupArn: !Ref TargetGroup
+      HealthCheckGracePeriodSeconds: 60
+
+  # --------------------------------------------------------------- CW dashboard
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-usage"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": { "markdown": "# Claude Apps Gateway — usage (self-hosted collector)\nMetrics via ADOT awsemf in namespace **${MetricsNamespace}**. Populates once developers run inference through the gateway." }
+            },
+            {
+              "type": "metric", "x": 0, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Token usage (sum)",
+                "region": "${AWS::Region}",
+                "stat": "Sum", "period": 300,
+                "metrics": [ [ "${MetricsNamespace}", "claude_code.token.usage", "OTelLib", "com.anthropic.claude_code" ] ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Cost usage (sum)",
+                "region": "${AWS::Region}",
+                "stat": "Sum", "period": 300,
+                "metrics": [ [ "${MetricsNamespace}", "claude_code.cost.usage", "OTelLib", "com.anthropic.claude_code" ] ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 8, "width": 24, "height": 6,
+              "properties": {
+                "title": "Sessions / active time",
+                "region": "${AWS::Region}",
+                "stat": "Sum", "period": 300,
+                "metrics": [ [ "${MetricsNamespace}", "claude_code.session.count", "OTelLib", "com.anthropic.claude_code" ] ]
+              }
+            }
+          ]
+        }
+
+Outputs:
+  CollectorEndpoint:
+    Description: Pass as COLLECTOR_ENDPOINT to the gateway deploy (telemetry forward target).
+    Value: !If [ManagedCertMode, !Sub "https://${DomainName}", !Sub "https://${CollectorHostname}"]
+  DashboardName:
+    Value: !Sub "${AWS::StackName}-usage"
+  MetricsLogGroup:
+    Value: /aws/claude-gateway/metrics

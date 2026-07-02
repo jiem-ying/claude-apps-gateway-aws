@@ -1,0 +1,26 @@
+# Never commit generated PKI / secrets / state.
+# The templates + scripts ARE tracked; locally-generated certs, keys, CA, VPN
+# profiles, and cached ARNs are not.
+vpn-pki/
+gateway-ca.pem
+.cert-arn
+*.ovpn
+*.key
+*.crt
+*.pem
+
+# Local env / tooling
+.env
+.env.*
+.DS_Store
+
+# Self-hosted collector PKI (generated)
+collector-pki/
+gateway/extra-ca/*.crt
+
+# Per-peer onboarding bundles (contain their private client cert; never commit)
+peer-bundles/
+
+# User's own config file (they cp a profile to config/my.env before deploying)
+config/my.env
+config/*.local.env
