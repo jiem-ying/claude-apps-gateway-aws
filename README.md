@@ -156,9 +156,12 @@ The zip contains a **VPN client private key** — treat it as sensitive. To shar
 safely, deploy the optional distribution stack once, then upload + presign:
 
 ```bash
-# One-time (per account/region):
+# One-time (per account/region). CAPABILITY_NAMED_IAM is required: the stack
+# creates a dedicated, named IAM signer user (<stack>-signer) whose static keys
+# sign full-TTL (24h) presigned URLs — SSO/assumed-role creds would cap them at ~1h.
 aws cloudformation deploy --stack-name claude-gateway-distribution \
   --template-file infrastructure/distribution.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
   --region <your-region> --tags auto-delete=no project=claude-apps-gateway
 
 # Per peer:
