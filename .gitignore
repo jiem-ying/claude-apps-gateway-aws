@@ -24,3 +24,7 @@ peer-bundles/
 # User's own config file (they cp a profile to config/my.env before deploying)
 config/my.env
 config/*.local.env
+
+# Python
+__pycache__/
+*.pyc

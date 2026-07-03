@@ -57,6 +57,38 @@ Outputs `UserPoolId`, `ClientId`, `ClientSecretArn`, `Issuer`, `HostedUiDomain`.
 The pool is created with `DeletionPolicy: Retain` so you won't lose users if you
 tear the stack down.
 
+### Groups & RBAC
+
+`cognito-create-pool.yaml` also creates two demo groups — `platform` (full access)
+and `partners` (restricted) — via `FullAccessGroupName` / `RestrictedGroupName`.
+Group **membership** is what the gateway's `managed.policies` match on; it flows to
+the gateway automatically through the `cognito:groups` claim once a user is assigned
+— **no app-client, scope, or schema change is needed** (Cognito injects the claim
+for any user in ≥1 group; the gateway reads it via `groups_claim: cognito:groups` +
+`userinfo_fallback: true`).
+
+Create groups and assign users (all **live**, no redeploy):
+
+```bash
+POOL=<region>_xxxxxxxxx
+# Groups (already created by the template above; shown for an existing pool):
+aws cognito-idp create-group --user-pool-id $POOL --group-name platform
+aws cognito-idp create-group --user-pool-id $POOL --group-name partners
+# Assign users:
+aws cognito-idp admin-add-user-to-group --user-pool-id $POOL --username alice --group-name platform
+aws cognito-idp admin-add-user-to-group --user-pool-id $POOL --username bob   --group-name partners
+```
+
+`make-peer-bundle.sh <user> <email> [group]` takes an optional third arg that runs
+the assignment for you during onboarding.
+
+> **Re-login required.** A user picks up new group membership only on a **fresh
+> token** — they must `/logout` then `/login`. This Cognito app client issues no
+> refresh token, so the new `cognito:groups` claim is minted only at next sign-in.
+> Editing the *policy* itself (not membership) requires a **gateway redeploy** (its
+> config lives in the ECS task-def). See [`../docs/CONFIG.md`](../docs/CONFIG.md) →
+> *Group-based policy* and the [`weather-mcp`](../examples/weather-mcp/) demo.
+
 ## Path 3 — Okta / Entra ID / Google Workspace / Keycloak / other
 
 No template needed here. In your IdP, create a **confidential OIDC web app** with

@@ -14,6 +14,7 @@
 #   __ALLOWED_DOMAINS__  comma-less YAML list, e.g. [example.com]
 #   __GROUPS_CLAIM__     IdP groups claim (Cognito: cognito:groups)
 #   __BEDROCK_REGION__   e.g. us-east-1
+#   __MANAGED_BLOCK__    rendered managed.policies (group RBAC), or empty (no policies)
 #   __TELEMETRY_BLOCK__  rendered telemetry section, or empty (no hard dependency)
 #
 # Secret env vars expanded by the gateway (injected by ECS from Secrets Manager):
@@ -118,6 +119,14 @@ models:
     upstream_model: {bedrock: global.anthropic.claude-haiku-4-5-20251001-v1:0}
   - id: claude-fable-5
     upstream_model: {bedrock: global.anthropic.claude-fable-5}
+
+# Group-based RBAC (OPTIONAL). When __MANAGED_BLOCK__ renders empty, no policies
+# apply and every signed-in user gets full access. When rendered, it delivers
+# per-group model allowlists and/or tool permissions to the CLI at sign-in;
+# policies are evaluated top-to-bottom, first match wins, match: {} is the
+# catch-all. NOTE: the gateway can gate models/tools but CANNOT distribute MCP
+# servers (mcpServers in a policy is rejected at boot) — install those locally.
+__MANAGED_BLOCK__
 
 # Telemetry is OPTIONAL. When __TELEMETRY_BLOCK__ renders empty, the gateway
 # forwards no telemetry and works fully — no dependency on the observability

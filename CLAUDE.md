@@ -60,6 +60,24 @@ running:
   `deploy-all.sh` defaults it to `true` when `ENABLE_COLLECTOR=true`, else `false`.
   Collector alarms: `ALARM_EMAIL` (optional SNS sub) + `DAILY_COST_THRESHOLD_USD`.
 
+## Group RBAC (`managed.policies`; `DENY_TOOL_GROUP` / `DENY_TOOLS`)
+
+- `gateway.yaml.example` has a `__MANAGED_BLOCK__` placeholder (like
+  `__TELEMETRY_BLOCK__`), rendered by `deploy.sh`. `DENY_TOOL_GROUP=<group>` +
+  `DENY_TOOLS=<comma-sep tool rules>` emits a first-match policy that denies those
+  tools to that group and a `match: {}` catch-all (everyone else unrestricted).
+  Empty group ⇒ empty block ⇒ no policies (backward-compatible).
+- **Tool permission strings:** `mcp__<server>` (whole server) or
+  `mcp__<server>__<tool>` (one tool). `permissions` gate tools model-agnostically;
+  `availableModels` gates models. **Neither is per-tool-per-model** — the model is
+  chosen per session, so "model X only for tool Y" is NOT expressible.
+- **The gateway CANNOT push MCP servers** (`mcpServers` in a policy is rejected at
+  boot). Install MCP servers locally; the gateway only gates access. See
+  `examples/weather-mcp/`.
+- **Propagation:** policy edits need a gateway **redeploy** (config-in-taskdef) +
+  reach CLIs on the ~hourly settings poll; a user's new **group membership** needs a
+  fresh token, i.e. **re-login** (this Cognito client has no refresh token).
+
 ## Key architectural facts (things easy to get wrong)
 
 - **ALB must stay `Scheme: internal` + `IpAddressType: ipv4`.** Claude Code's
@@ -70,9 +88,10 @@ running:
 - **Gateway config lives in the task definition**, not SSM. Changing the
   telemetry endpoint or model list forces a new task-def revision → ECS auto-cycles.
   Do NOT reintroduce SSM injection — telemetry changes silently wouldn't take effect.
-- **Config-in-taskdef limit is 4096 bytes.** The current render is ~3000; the
-  model allowlist has the most headroom to grow. `FORWARD_LOGS=true` adds
-  `logs: true` (~13 bytes) to the telemetry block — negligible.
+- **Config-in-taskdef limit is 4096 bytes.** The current render is ~3000 (a bit
+  more with telemetry/managed blocks); the model allowlist has the most headroom to
+  grow. `FORWARD_LOGS=true` adds `logs: true` (~13 bytes); the managed block adds a
+  bit more. `deploy.sh` now hard-fails the deploy if the rendered config is ≥ 4096 bytes.
 - **Observability cardinality: metrics vs. Logs Insights.** In `collector.yaml`,
   only `user.email`/`user.groups` on `token.usage`/`cost.usage` are promoted to
   metric dimensions (each distinct value = a custom metric = $). High-cardinality
