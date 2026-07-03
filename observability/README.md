@@ -10,10 +10,16 @@ the `awsemf` exporter, and ships a ready-made CloudWatch **dashboard**.
 gateway runs fine with no telemetry. There is no hard dependency either way.
 
 ```
-gateway (ECS) ──OTLP/HTTPS──▶ collector ALB (443) ──▶ ADOT (4318) ──awsemf──▶ CloudWatch
-                                                                               ├─ metrics (ns: ClaudeGateway)
-                                                                               └─ dashboard
+gateway (ECS) ──OTLP/HTTPS──▶ collector ALB (443) ──▶ ADOT (4318) ──┬─awsemf───────────▶ CloudWatch metrics (ns: ClaudeGateway)
+                                                                    └─awscloudwatchlogs▶ CloudWatch Logs (/aws/claude-gateway/events)
+                                                                                          ├─ dashboard (metrics + Logs Insights)
+                                                                                          └─ alarms ─▶ SNS topic
 ```
+
+Metrics are always forwarded when telemetry is on. **Audit events** (governance
+logs — tool decisions, auth, api_request/error) are **opt-in**: set
+`FORWARD_LOGS=true` on the gateway deploy so its telemetry block requests
+`logs: true`. The logs pipeline sits idle and harmless until then.
 
 ## Why HTTPS is mandatory here
 
@@ -108,13 +114,133 @@ Once developers run inference through the gateway, metrics land in the
 `ClaudeGateway` CloudWatch namespace and the `claude-gateway-collector-usage`
 dashboard populates.
 
+## What the gateway emits (OTEL reference)
+
+Claude Code is the source of the telemetry; the **gateway relays it and re-stamps
+every export with the signed-in user's identity** from the OIDC token (so you get
+per-user/team attribution with zero developer-side config). Three signal types flow
+over the one OTLP/HTTP endpoint: **metrics** (always, when telemetry is on),
+**logs/events** (opt-in via `FORWARD_LOGS=true`), and **traces** (out of scope here).
+
+### Identity & resource attributes (stamped on everything)
+
+These ride on **every** metric and event, added by the gateway from the OIDC token —
+this is what makes governance possible. In the `awsemf` metrics path they become
+CloudWatch **dimensions** (via `resource_to_telemetry_conversion`); in the events
+path they appear under `attributes.*` in the log record.
+
+| Attribute | Source | What it gives you |
+|-----------|--------|-------------------|
+| `user.email` | OIDC `email` claim | Human-readable per-user attribution; email domain = org boundary |
+| `user.id` | OIDC `sub` claim | Stable, immutable per-user id (survives email changes) |
+| `user.groups` | OIDC groups claim (`GROUPS_CLAIM`) | **Team / role** attribution — the key RBAC-governance signal |
+| `organization.id` | IdP / org context | Org-level rollup |
+| `model` | per request | Model attribution on cost/token metrics (e.g. `claude-opus-4-8`) |
+| `session.id` | per CLI session | Session correlation |
+
+> `user.groups` is a **list**. In the metrics path awsemf stringifies the whole
+> array into one dimension value (keys on the group-*set*, not per-group); in the
+> events path Logs Insights can split it with `stats … by attributes.user.groups`.
+
+### Metrics (namespace `ClaudeGateway`)
+
+| Metric | Unit | Notable attributes | Governance / demo use |
+|--------|------|--------------------|-----------------------|
+| `claude_code.cost.usage` | USD | `user.email`, `user.groups`, `model` | Cost per user / team / model — spend governance |
+| `claude_code.token.usage` | tokens | `type` (input/output/cacheRead/cacheCreation), `model`, `user.email`, `user.groups` | Token volume + cache economics |
+| `claude_code.session.count` | count | — | Adoption; availability (no-session alarm) |
+| `claude_code.active_time.total` | seconds | — | Engagement / active time |
+| `claude_code.lines_of_code.count` | count | — | Productivity |
+| `claude_code.commit.count` | count | — | Productivity |
+| `claude_code.pull_request.count` | count | — | Productivity |
+| `claude_code.code_edit_tool.decision` | count | `decision` (accept/reject) | **Governance** — edit-tool accept/reject rate + alarm |
+
+Which attributes are promoted to CloudWatch metric **dimensions** is controlled by
+`metric_declarations` in `collector.yaml` — see the cardinality note below.
+
+### Events / audit logs (`FORWARD_LOGS=true` → `/aws/claude-gateway/events`)
+
+Opt-in structured events, keyed by `attributes.event_name`. These are the richest
+governance signals — queried by the dashboard's Logs Insights widgets.
+
+| `event_name` | Fires on | Key attributes (beyond identity) |
+|--------------|----------|----------------------------------|
+| `tool_decision` | Permission check on a tool | `tool_name`, `decision` (accept/reject/ask), `source` (config/hook/user_*) |
+| `auth` | Login / logout / session lifecycle | `outcome`, `method` (gateway vs local) |
+| `api_request` | Inference API call | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cost_usd`, `duration_ms`, `request_id` |
+| `api_error` | API error (4xx/5xx) | `model`, `request_id`, error type/message |
+| `user_prompt` | User submits a prompt | `prompt_length`, `command_name` (prompt text only if the sensitive body flag is on — not enabled here) |
+
+`tool_decision` is the highest-value governance event (who tried what, allowed or
+denied). `api_request` carries the authoritative per-call cost/token breakdown —
+the per-team-spend widget aggregates it and splits the `user.groups` array cleanly.
+
+> **What `FORWARD_LOGS` does *not* forward.** It relays event metadata (decisions,
+> tokens, cost, identity, tool names). It does **not** enable the gateway's most
+> sensitive prompt/response *body* capture. Keep it that way unless you have a reason
+> and the retention/compliance story to match — see **Audit events & governance** below.
+
 ## Metrics & dashboard
 
-The gateway stamps each OTLP export with the signed-in user's identity as resource
-attributes (`user.email`, `user.id`, `user.groups`), so `awsemf`
-`resource_to_telemetry_conversion` turns them into CloudWatch dimensions with no
-header-extraction processors. The dashboard shows token usage, cost, and sessions;
-extend `metric_declarations` in `collector.yaml` and the `Dashboard` body for more.
+The dashboard turns the reference above into views. It relies on the gateway-stamped
+resource attributes (`user.email`, `user.id`, `user.groups`) that `awsemf`
+`resource_to_telemetry_conversion` turns into CloudWatch dimensions — no
+header-extraction processors. Sections:
+
+- **Cost & tokens** — cost by user, cost by team/role (`user.groups`), token split
+  by type (input/output/cache), tokens by model. Metric widgets use `SEARCH()`
+  expressions so they auto-expand across whatever user/team/model values appear.
+- **Adoption & productivity** — sessions, active time, lines of code, commits, PRs.
+- **Governance — tool decisions** — edit-tool accept vs reject, plus API errors.
+- **Governance — audit events (Logs Insights)** — top users by tool rejections,
+  blocked/asked actions by tool, auth outcomes, recent API errors, per-team spend.
+
+**Cardinality note (costs real money at scale).** `user.email` / `user.groups` are
+promoted to metric dimensions only for `token.usage` / `cost.usage` — each distinct
+value mints a custom metric. For high-cardinality, ad-hoc per-user / per-role
+forensics prefer the **Logs Insights** widgets over `/aws/claude-gateway/events`
+rather than adding more `metric_declarations` dimension sets.
+
+**`user.groups` is an OIDC list.** `resource_to_telemetry_conversion` stringifies
+the whole array, so the `[[user.groups]]` metric dimension keys on the entire
+group-*set*, not one value per group. True per-team/per-role slicing is done by the
+Logs Insights `stats … by attributes.user.groups` widgets, which split it cleanly.
+
+## Audit events & governance (`FORWARD_LOGS=true`)
+
+When the gateway forwards logs, the structured events catalogued under **Events /
+audit logs** in the OTEL reference above land in the **`/aws/claude-gateway/events`**
+log group via the `awscloudwatchlogs` exporter, keyed by `attributes.event_name`. The
+dashboard's Logs Insights widgets query them from there.
+
+> **Field-path caveat.** The widget queries assume the exporter's JSON envelope
+> exposes event fields under `attributes.*`. The exact nesting is ADOT-version
+> dependent — after your first traffic, run one widget query via
+> `aws logs start-query` and adjust the `attributes.` prefixes (and the
+> `ApiErrorMetricFilter` pattern) if they differ. This is the single most likely
+> thing to need a tweak.
+
+> **Sensitivity.** Logs can carry commands, file paths, and prompts. `FORWARD_LOGS`
+> forwards event metadata (decisions, tokens, cost, identity); it does **not**
+> enable the gateway's most sensitive prompt/response body capture. Keep it that way
+> unless you have a reason and the retention/compliance story to match.
+
+## Alarms
+
+The stack always creates an SNS topic (`<stack>-alarms`, output `AlarmTopicArn`)
+and five starter alarms that publish to it:
+
+| Alarm | Fires when |
+|-------|------------|
+| `<stack>-daily-cost` | total `cost.usage` over 1 day > `DailyCostThresholdUsd` (default 500) |
+| `<stack>-cost-anomaly` | hourly cost leaves its `ANOMALY_DETECTION_BAND` |
+| `<stack>-tool-rejections` | > 25 edit-tool rejections in an hour |
+| `<stack>-api-errors` | > 10 `api_error` events in 5 min (needs `FORWARD_LOGS=true`) |
+| `<stack>-no-sessions` | no sessions for 3 consecutive hours |
+
+Set **`AlarmEmail`** to subscribe an address (confirm the SNS email). Leave it
+empty and the topic is created unsubscribed — wire it to Slack/PagerDuty yourself.
+Via `deploy-all.sh`, use `ALARM_EMAIL` / `DAILY_COST_THRESHOLD_USD`.
 
 ## Teardown
 

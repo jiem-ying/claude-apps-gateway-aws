@@ -22,6 +22,9 @@
 #   ENABLE_COLLECTOR           "true" | "false"                             (default: false)
 #   ENABLE_VPN                 "true" | "false"                             (default: false)
 #   BUILD_IMAGE                "true" | "false"                             (default: false — reuse)
+#   FORWARD_LOGS               "true" | "false"  forward audit events too   (default: ENABLE_COLLECTOR)
+#   ALARM_EMAIL                email to subscribe to collector alarms        (default: none)
+#   DAILY_COST_THRESHOLD_USD   daily cost alarm threshold                    (default: 500)
 #   CLAUDE_VERSION             pinned binary version if BUILD_IMAGE         (default: 2.1.196)
 #
 # Plus every var deploy.sh accepts (AWS_REGION, PUBLIC_HOSTED_ZONE_ID,
@@ -35,6 +38,14 @@ IDP_MODE="${IDP_MODE:-byo}"
 ENABLE_COLLECTOR="${ENABLE_COLLECTOR:-false}"
 ENABLE_VPN="${ENABLE_VPN:-false}"
 BUILD_IMAGE="${BUILD_IMAGE:-false}"
+# When we stand up the bundled collector, default to forwarding audit events too
+# so the governance dashboard/Logs Insights widgets populate for the demo. Global
+# default stays false (metrics only). Override by exporting FORWARD_LOGS yourself.
+if [[ "$ENABLE_COLLECTOR" == "true" ]]; then
+  export FORWARD_LOGS="${FORWARD_LOGS:-true}"
+else
+  export FORWARD_LOGS="${FORWARD_LOGS:-false}"
+fi
 # Default versions from the repo-root VERSION file (single source of truth).
 _VERSION_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/VERSION"
 _REPO_VERSION="$(awk -F= '/^repo_version=/{print $2}' "$_VERSION_FILE" 2>/dev/null || echo unknown)"
@@ -147,6 +158,8 @@ if [[ "$ENABLE_COLLECTOR" == "true" ]]; then
       "PublicHostedZoneId=$PUBLIC_HOSTED_ZONE_ID" \
       "DomainName=$COLLECTOR_HOST" \
       "VpcCidr=$VPC_CIDR_OUT" \
+      "AlarmEmail=${ALARM_EMAIL:-}" \
+      "DailyCostThresholdUsd=${DAILY_COST_THRESHOLD_USD:-500}" \
     --tags auto-delete=no project=claude-apps-gateway \
     --no-fail-on-empty-changeset
   COLLECTOR_URL="$(cfn describe-stacks --stack-name "$COLLECTOR_STACK" --query "Stacks[0].Outputs[?OutputKey=='CollectorEndpoint'].OutputValue" --output text)"

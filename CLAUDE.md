@@ -53,6 +53,12 @@ running:
 - `ENABLE_COLLECTOR=true` (orchestrator only) — bundle the ADOT collector +
   CloudWatch dashboard; orchestrator injects its URL as `COLLECTOR_ENDPOINT`
   in the post-collector gateway update.
+- `FORWARD_LOGS=true` — also forward audit **events** (adds `logs: true` to the
+  rendered telemetry block). The bundled collector lands them in
+  `/aws/claude-gateway/events` (a second `awscloudwatchlogs` pipeline) → drives the
+  governance Logs Insights widgets + the `api_error` alarm. Metrics-only otherwise.
+  `deploy-all.sh` defaults it to `true` when `ENABLE_COLLECTOR=true`, else `false`.
+  Collector alarms: `ALARM_EMAIL` (optional SNS sub) + `DAILY_COST_THRESHOLD_USD`.
 
 ## Key architectural facts (things easy to get wrong)
 
@@ -65,7 +71,15 @@ running:
   telemetry endpoint or model list forces a new task-def revision → ECS auto-cycles.
   Do NOT reintroduce SSM injection — telemetry changes silently wouldn't take effect.
 - **Config-in-taskdef limit is 4096 bytes.** The current render is ~3000; the
-  model allowlist has the most headroom to grow.
+  model allowlist has the most headroom to grow. `FORWARD_LOGS=true` adds
+  `logs: true` (~13 bytes) to the telemetry block — negligible.
+- **Observability cardinality: metrics vs. Logs Insights.** In `collector.yaml`,
+  only `user.email`/`user.groups` on `token.usage`/`cost.usage` are promoted to
+  metric dimensions (each distinct value = a custom metric = $). High-cardinality
+  per-user/per-role slicing is done by CloudWatch Logs Insights over
+  `/aws/claude-gateway/events`, not by adding more `metric_declarations`. Also
+  `user.groups` is an OIDC list that awsemf stringifies → the metric dimension
+  keys on the whole group-set; per-group splitting is a Logs Insights job.
 - **Model IDs must match what the CLI sends.** The current allowlist covers
   fully-qualified `global.anthropic.*` (opus-4-6/7/8, sonnet-4-6, sonnet-5,
   haiku-4-5, fable-5) AND short aliases (`claude-opus-4-8`, `claude-sonnet-5`,
