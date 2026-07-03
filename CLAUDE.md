@@ -54,6 +54,24 @@ running:
   CloudWatch dashboard; orchestrator injects its URL as `COLLECTOR_ENDPOINT`
   in the post-collector gateway update.
 
+## Group RBAC (`managed.policies`; `DENY_TOOL_GROUP` / `DENY_TOOLS`)
+
+- `gateway.yaml.example` has a `__MANAGED_BLOCK__` placeholder (like
+  `__TELEMETRY_BLOCK__`), rendered by `deploy.sh`. `DENY_TOOL_GROUP=<group>` +
+  `DENY_TOOLS=<comma-sep tool rules>` emits a first-match policy that denies those
+  tools to that group and a `match: {}` catch-all (everyone else unrestricted).
+  Empty group ⇒ empty block ⇒ no policies (backward-compatible).
+- **Tool permission strings:** `mcp__<server>` (whole server) or
+  `mcp__<server>__<tool>` (one tool). `permissions` gate tools model-agnostically;
+  `availableModels` gates models. **Neither is per-tool-per-model** — the model is
+  chosen per session, so "model X only for tool Y" is NOT expressible.
+- **The gateway CANNOT push MCP servers** (`mcpServers` in a policy is rejected at
+  boot). Install MCP servers locally; the gateway only gates access. See
+  `examples/weather-mcp/`.
+- **Propagation:** policy edits need a gateway **redeploy** (config-in-taskdef) +
+  reach CLIs on the ~hourly settings poll; a user's new **group membership** needs a
+  fresh token, i.e. **re-login** (this Cognito client has no refresh token).
+
 ## Key architectural facts (things easy to get wrong)
 
 - **ALB must stay `Scheme: internal` + `IpAddressType: ipv4`.** Claude Code's
@@ -64,8 +82,9 @@ running:
 - **Gateway config lives in the task definition**, not SSM. Changing the
   telemetry endpoint or model list forces a new task-def revision → ECS auto-cycles.
   Do NOT reintroduce SSM injection — telemetry changes silently wouldn't take effect.
-- **Config-in-taskdef limit is 4096 bytes.** The current render is ~3000; the
-  model allowlist has the most headroom to grow.
+- **Config-in-taskdef limit is 4096 bytes.** The current render is ~3000 (a bit
+  more with telemetry/managed blocks); the model allowlist has the most headroom to
+  grow. `deploy.sh` now hard-fails the deploy if the rendered config is ≥ 4096 bytes.
 - **Model IDs must match what the CLI sends.** The current allowlist covers
   fully-qualified `global.anthropic.*` (opus-4-6/7/8, sonnet-4-6, sonnet-5,
   haiku-4-5, fable-5) AND short aliases (`claude-opus-4-8`, `claude-sonnet-5`,

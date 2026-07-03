@@ -23,6 +23,17 @@ Parameters:
     Type: String
     Default: admin
     Description: Cognito username for the initial admin user, e.g. a short handle like 'alice'. Sign-in still uses AdminEmail (email is an alias).
+  # RBAC demo groups. Membership flows to the gateway via the cognito:groups claim
+  # (no app-client change needed) and drives managed.policies matching. Assign
+  # users with `aws cognito-idp admin-add-user-to-group` (see idp/README.md).
+  FullAccessGroupName:
+    Type: String
+    Default: platform
+    Description: Group whose members get full model + tool access (matched by the gateway's catch-all policy).
+  RestrictedGroupName:
+    Type: String
+    Default: partners
+    Description: Group the gateway policy restricts (e.g. denies a tool). No models are removed unless you configure it to.
 
 Resources:
   UserPool:
@@ -92,6 +103,21 @@ Resources:
       UserAttributes:
         - { Name: email, Value: !Ref AdminEmail }
         - { Name: email_verified, Value: "true" }
+
+  # RBAC groups. Creating them is enough for the cognito:groups claim to carry a
+  # user's membership once assigned; the gateway's managed.policies key on it.
+  FullAccessGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: !Ref FullAccessGroupName
+      Description: Full model + tool access (gateway catch-all policy).
+  RestrictedGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: !Ref RestrictedGroupName
+      Description: Restricted by a gateway managed policy (e.g. a denied tool).
 
   SecretStoreRole:
     Type: AWS::IAM::Role

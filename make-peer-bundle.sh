@@ -19,12 +19,15 @@
 #     initial make-vpn-certs.sh run)
 #
 # Usage:
-#   ./make-peer-bundle.sh <peer-username> <peer-email>
-#   e.g.: ./make-peer-bundle.sh alice alice@example.com
+#   ./make-peer-bundle.sh <peer-username> <peer-email> [group]
+#   e.g.: ./make-peer-bundle.sh alice alice@example.com partners
+#   The optional [group] assigns the user to a Cognito group (must already exist)
+#   so the gateway's managed.policies apply to them. Omit for no group.
 set -euo pipefail
 
-PEER_NAME="${1:?usage: ./make-peer-bundle.sh <peer-username> <peer-email>}"
-PEER_EMAIL="${2:?usage: ./make-peer-bundle.sh <peer-username> <peer-email>}"
+PEER_NAME="${1:?usage: ./make-peer-bundle.sh <peer-username> <peer-email> [group]}"
+PEER_EMAIL="${2:?usage: ./make-peer-bundle.sh <peer-username> <peer-email> [group]}"
+PEER_GROUP="${3:-}"   # optional Cognito group to assign the user to
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Shared AWS helpers: region resolve + guard, AWS_ARGS, cfn, aws_preflight.
@@ -72,6 +75,15 @@ else
     --desired-delivery-mediums EMAIL \
     "${AWS_ARGS[@]}" --output text >/dev/null
   echo "    created user '$PEER_NAME' (temp password emailed to $PEER_EMAIL)"
+fi
+
+# Optional group assignment (idempotent). Group must already exist in the pool.
+# The cognito:groups claim carries it once the user next signs in, so the
+# gateway's managed.policies match them.
+if [[ -n "$PEER_GROUP" ]]; then
+  aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+    --username "$PEER_NAME" --group-name "$PEER_GROUP" "${AWS_ARGS[@]}"
+  echo "    added '$PEER_NAME' to group '$PEER_GROUP' (takes effect on their next login)"
 fi
 
 # ---- 3. Generate per-peer client cert (reuses existing CA) ------------------

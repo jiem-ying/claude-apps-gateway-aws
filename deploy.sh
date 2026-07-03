@@ -59,6 +59,11 @@ MIN_TASKS="${MIN_TASKS:-2}"
 MAX_TASKS="${MAX_TASKS:-10}"
 MULTI_AZ_DB="${MULTI_AZ_DB:-false}"
 COLLECTOR_ENDPOINT="${COLLECTOR_ENDPOINT:-}"          # empty = no telemetry
+# Optional group RBAC: deny a set of tools to one IdP group (keeps their models).
+# e.g. DENY_TOOL_GROUP=partners DENY_TOOLS=mcp__weather  -> partners lose the
+# weather MCP tool; everyone else is unrestricted. Empty = no managed policies.
+DENY_TOOL_GROUP="${DENY_TOOL_GROUP:-}"
+DENY_TOOLS="${DENY_TOOLS:-mcp__weather}"               # comma-separated tool rules
 GATEWAY_STACK="${GATEWAY_STACK:-claude-gateway}"
 
 # Fail FAST if AWS credentials are missing/expired (see lib/aws-common.sh for why
@@ -149,6 +154,18 @@ else
 fi
 DOMAINS_YAML="[$(echo "$ALLOWED_DOMAINS" | sed 's/,/, /g')]"
 
+# Group RBAC: deny DENY_TOOLS (comma-separated tool rules) to DENY_TOOL_GROUP;
+# everyone else (match: {}) is unrestricted. Flow style keeps it under the
+# 4096-byte task-def config budget. Empty group => empty block => no policies.
+if [[ -n "$DENY_TOOL_GROUP" ]]; then
+  DENY_TOOLS_YAML="[\"$(echo "$DENY_TOOLS" | sed 's/,/", "/g')\"]"
+  MANAGED_BLOCK=$(printf 'managed:\n  policies:\n    - match: {groups: [%s]}\n      cli: {permissions: {deny: %s}}\n    - match: {}\n' \
+    "$DENY_TOOL_GROUP" "$DENY_TOOLS_YAML")
+  echo "==> group RBAC: deny [$DENY_TOOLS] to group '$DENY_TOOL_GROUP' (all other groups unrestricted)"
+else
+  MANAGED_BLOCK=""
+fi
+
 # Render: strip the template's comment header, substitute placeholders.
 RENDERED="$(sed '/^# /d; /^#$/d' "$SCRIPT_DIR/gateway/gateway.yaml.example" \
   | sed \
@@ -159,7 +176,18 @@ RENDERED="$(sed '/^# /d; /^#$/d' "$SCRIPT_DIR/gateway/gateway.yaml.example" \
       -e "s#__ALLOWED_DOMAINS__#$DOMAINS_YAML#" \
       -e "s#__GROUPS_CLAIM__#$GROUPS_CLAIM#" \
       -e "s#__BEDROCK_REGION__#$BEDROCK_REGION#")"
+RENDERED="${RENDERED/__MANAGED_BLOCK__/$MANAGED_BLOCK}"
 RENDERED="${RENDERED/__TELEMETRY_BLOCK__/$TELEMETRY_BLOCK}"
+
+# The rendered config is injected as one ECS task-def env var, capped at 4096
+# bytes. Fail loudly here rather than getting a confusing deploy-time error.
+CONFIG_BYTES=$(printf '%s' "$RENDERED" | wc -c | tr -d ' ')
+if (( CONFIG_BYTES >= 4096 )); then
+  echo "ERROR: rendered gateway config is ${CONFIG_BYTES} bytes (>= 4096, the ECS task-def env limit)." >&2
+  echo "       Trim the model allowlist or the managed policies (see docs/CONFIG.md)." >&2
+  exit 1
+fi
+echo "    rendered gateway config: ${CONFIG_BYTES}/4096 bytes"
 
 cfn deploy --stack-name "$GATEWAY_STACK" \
   --template-file "$SCRIPT_DIR/infrastructure/claude-apps-gateway.yaml" \

@@ -179,9 +179,37 @@ managed:
 ```
 
 `availableModels` is enforced both client-side (the picker) and server-side (a 400
-on an unauthorized model). Settings refresh about hourly, so policy changes reach
-developers within an hour of redeploy. This example repo focuses on the allowlist;
-group policies are an enhancement you layer on per the official config reference.
+on an unauthorized model). `permissions` gate **tools**, model-agnostically — a rule
+like `mcp__weather` removes that whole MCP server from the group's CLI (a scoped
+`mcp__weather__get_weather` denies just one tool). Settings refresh about hourly, so
+policy changes reach developers within an hour of redeploy.
+
+**This repo now wires a policy block** (it used to be doc-only). `deploy.sh` renders
+`__MANAGED_BLOCK__` from two env vars:
+
+```bash
+DENY_TOOL_GROUP=partners       # IdP group to restrict (empty = no policies)
+DENY_TOOLS=mcp__weather        # comma-separated tool rules to deny that group
+```
+
+which produces the group-RBAC demo in [`examples/weather-mcp/`](../examples/weather-mcp/):
+`partners` keep **all models** but lose the weather tool; everyone else (`match: {}`)
+is unrestricted. Peers wanting a model restriction instead can hand-edit the block in
+`gateway/gateway.yaml.example` per the official config reference — keep the whole
+rendered config **under 4096 bytes** (`deploy.sh` fails the deploy if it isn't).
+
+> **The gateway cannot distribute MCP servers.** `mcpServers` inside a policy is
+> rejected at boot — the gateway gates *access* to tools, but each developer installs
+> the MCP server locally (see the weather example).
+
+### What's a hotfix vs. what needs a redeploy / re-login
+
+| Change | Hotfix (live)? | Re-auth? |
+|--------|----------------|----------|
+| Create a group / assign a user (`admin-add-user-to-group`) | yes, no redeploy | — |
+| Edit `managed.policies` (config lives in the task-def) | **needs gateway redeploy** (new task-def revision → ECS cycles) | — |
+| A user picking up new **group membership** | only on a fresh token | **user must `/logout` + `/login`** — this Cognito client has no refresh token, so the new `cognito:groups` claim is minted only at next login |
+| Policy contents reaching an already-logged-in CLI | next managed-settings poll (~hourly) after redeploy | — |
 
 ## Telemetry (optional)
 
