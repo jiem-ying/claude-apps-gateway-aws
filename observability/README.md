@@ -10,10 +10,16 @@ the `awsemf` exporter, and ships a ready-made CloudWatch **dashboard**.
 gateway runs fine with no telemetry. There is no hard dependency either way.
 
 ```
-gateway (ECS) ──OTLP/HTTPS──▶ collector ALB (443) ──▶ ADOT (4318) ──awsemf──▶ CloudWatch
-                                                                               ├─ metrics (ns: ClaudeGateway)
-                                                                               └─ dashboard
+gateway (ECS) ──OTLP/HTTPS──▶ collector ALB (443) ──▶ ADOT (4318) ──┬─awsemf───────────▶ CloudWatch metrics (ns: ClaudeGateway)
+                                                                    └─awscloudwatchlogs▶ CloudWatch Logs (/aws/claude-gateway/events)
+                                                                                          ├─ dashboard (metrics + Logs Insights)
+                                                                                          └─ alarms ─▶ SNS topic
 ```
+
+Metrics are always forwarded when telemetry is on. **Audit events** (governance
+logs — tool decisions, auth, api_request/error) are **opt-in**: set
+`FORWARD_LOGS=true` on the gateway deploy so its telemetry block requests
+`logs: true`. The logs pipeline sits idle and harmless until then.
 
 ## Why HTTPS is mandatory here
 
@@ -113,8 +119,63 @@ dashboard populates.
 The gateway stamps each OTLP export with the signed-in user's identity as resource
 attributes (`user.email`, `user.id`, `user.groups`), so `awsemf`
 `resource_to_telemetry_conversion` turns them into CloudWatch dimensions with no
-header-extraction processors. The dashboard shows token usage, cost, and sessions;
-extend `metric_declarations` in `collector.yaml` and the `Dashboard` body for more.
+header-extraction processors. The dashboard is sectioned:
+
+- **Cost & tokens** — cost by user, cost by team/role (`user.groups`), token split
+  by type (input/output/cache), tokens by model. Metric widgets use `SEARCH()`
+  expressions so they auto-expand across whatever user/team/model values appear.
+- **Adoption & productivity** — sessions, active time, lines of code, commits, PRs.
+- **Governance — tool decisions** — edit-tool accept vs reject, plus API errors.
+- **Governance — audit events (Logs Insights)** — top users by tool rejections,
+  blocked/asked actions by tool, auth outcomes, recent API errors, per-team spend.
+
+**Cardinality note (costs real money at scale).** `user.email` / `user.groups` are
+promoted to metric dimensions only for `token.usage` / `cost.usage` — each distinct
+value mints a custom metric. For high-cardinality, ad-hoc per-user / per-role
+forensics prefer the **Logs Insights** widgets over `/aws/claude-gateway/events`
+rather than adding more `metric_declarations` dimension sets.
+
+**`user.groups` is an OIDC list.** `resource_to_telemetry_conversion` stringifies
+the whole array, so the `[[user.groups]]` metric dimension keys on the entire
+group-*set*, not one value per group. True per-team/per-role slicing is done by the
+Logs Insights `stats … by attributes.user.groups` widgets, which split it cleanly.
+
+## Audit events & governance (`FORWARD_LOGS=true`)
+
+When the gateway forwards logs, structured events land in the
+**`/aws/claude-gateway/events`** log group via the `awscloudwatchlogs` exporter:
+`tool_decision` (accept/reject/ask), `auth`, `api_request`, `api_error`,
+`user_prompt`. The dashboard's Logs Insights widgets query them by
+`attributes.event_name`.
+
+> **Field-path caveat.** The widget queries assume the exporter's JSON envelope
+> exposes event fields under `attributes.*`. The exact nesting is ADOT-version
+> dependent — after your first traffic, run one widget query via
+> `aws logs start-query` and adjust the `attributes.` prefixes (and the
+> `ApiErrorMetricFilter` pattern) if they differ. This is the single most likely
+> thing to need a tweak.
+
+> **Sensitivity.** Logs can carry commands, file paths, and prompts. `FORWARD_LOGS`
+> forwards event metadata (decisions, tokens, cost, identity); it does **not**
+> enable the gateway's most sensitive prompt/response body capture. Keep it that way
+> unless you have a reason and the retention/compliance story to match.
+
+## Alarms
+
+The stack always creates an SNS topic (`<stack>-alarms`, output `AlarmTopicArn`)
+and five starter alarms that publish to it:
+
+| Alarm | Fires when |
+|-------|------------|
+| `<stack>-daily-cost` | total `cost.usage` over 1 day > `DailyCostThresholdUsd` (default 500) |
+| `<stack>-cost-anomaly` | hourly cost leaves its `ANOMALY_DETECTION_BAND` |
+| `<stack>-tool-rejections` | > 25 edit-tool rejections in an hour |
+| `<stack>-api-errors` | > 10 `api_error` events in 5 min (needs `FORWARD_LOGS=true`) |
+| `<stack>-no-sessions` | no sessions for 3 consecutive hours |
+
+Set **`AlarmEmail`** to subscribe an address (confirm the SNS email). Leave it
+empty and the topic is created unsubscribed — wire it to Slack/PagerDuty yourself.
+Via `deploy-all.sh`, use `ALARM_EMAIL` / `DAILY_COST_THRESHOLD_USD`.
 
 ## Teardown
 

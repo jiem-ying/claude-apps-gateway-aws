@@ -59,6 +59,7 @@ MIN_TASKS="${MIN_TASKS:-2}"
 MAX_TASKS="${MAX_TASKS:-10}"
 MULTI_AZ_DB="${MULTI_AZ_DB:-false}"
 COLLECTOR_ENDPOINT="${COLLECTOR_ENDPOINT:-}"          # empty = no telemetry
+FORWARD_LOGS="${FORWARD_LOGS:-false}"                 # true = also forward audit events (logs)
 GATEWAY_STACK="${GATEWAY_STACK:-claude-gateway}"
 
 # Fail FAST if AWS credentials are missing/expired (see lib/aws-common.sh for why
@@ -88,6 +89,7 @@ case "${COLLECTOR_ENDPOINT:-}" in
     ;;
 esac
 echo "==> telemetry: $TELEMETRY_MODE"
+[[ "$TELEMETRY_MODE" != "off" ]] && echo "==> telemetry logs (audit events) forwarding: $FORWARD_LOGS"
 
 # ---- 1/2 choose TLS/DNS mode -------------------------------------------------
 # CONNECT_HOST is the hostname devs use — it becomes the gateway public_url (which
@@ -143,7 +145,14 @@ fi
 # ---- 2/2 render gateway.yaml + deploy ----------------------------------------
 echo "==> 2/2 Render gateway.yaml + deploy gateway stack"
 if [[ -n "$COLLECTOR_ENDPOINT" ]]; then
-  TELEMETRY_BLOCK=$(printf 'telemetry:\n  forward_to:\n    - url: %s\n      metrics: true\n' "$COLLECTOR_ENDPOINT")
+  # metrics always on when telemetry is enabled; logs (audit events — tool
+  # decisions, auth, api_request/error) are opt-in via FORWARD_LOGS. traces stay
+  # off (most sensitive; out of scope). +13 bytes vs the 4096B task-def budget.
+  if [[ "$FORWARD_LOGS" == "true" ]]; then
+    TELEMETRY_BLOCK=$(printf 'telemetry:\n  forward_to:\n    - url: %s\n      metrics: true\n      logs: true\n' "$COLLECTOR_ENDPOINT")
+  else
+    TELEMETRY_BLOCK=$(printf 'telemetry:\n  forward_to:\n    - url: %s\n      metrics: true\n' "$COLLECTOR_ENDPOINT")
+  fi
 else
   TELEMETRY_BLOCK=""
 fi

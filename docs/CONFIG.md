@@ -207,6 +207,13 @@ developer-side config. Key points for AWS:
 - **`metrics` is the safe default; `logs`/`traces` are opt-in** because they carry
   commands and file paths. The gateway itself never logs prompt/completion content.
 - Setting `forward_to` automatically pushes the OTEL env vars to connected clients.
+- **`deploy.sh` renders this block from `COLLECTOR_ENDPOINT` + `FORWARD_LOGS`.**
+  `FORWARD_LOGS=true` adds `logs: true` so governance events (`tool_decision`,
+  `auth`, `api_request`, `api_error`) reach the collector — the bundled collector
+  lands them in the `/aws/claude-gateway/events` log group and drives the
+  dashboard's Logs Insights + governance alarms. `traces` stays off (out of scope).
+  The rendered config must still fit the 4096-byte task-def budget (~3000 used;
+  `logs: true` adds ~13 bytes).
 
 ## Spend caps (optional)
 
