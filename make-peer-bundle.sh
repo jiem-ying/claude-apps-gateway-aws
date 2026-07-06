@@ -106,6 +106,16 @@ cd - >/dev/null
 echo "==> assemble .ovpn"
 aws ec2 export-client-vpn-client-configuration --client-vpn-endpoint-id "$VPN_ENDPOINT" \
   "${AWS_ARGS[@]}" --output text > "$OUT_DIR/claude-gw.ovpn"
+# Clamp the tunnel MTU so full-size TLS packets don't get black-holed by a
+# lower-MTU hop on the path (a PMTUD black hole stalls `/login` and truncates
+# streamed responses mid-flight). Baking these in means every reconnect starts
+# clamped, instead of relying on the manual `ifconfig utunN mtu 1300` workaround.
+# tun-mtu 1300 sizes the tunnel interface; mssfix 1260 caps TCP MSS with room
+# for the tunnel's own encapsulation overhead.
+{ echo ""
+  echo "# --- MTU clamp (see README: PMTUD black hole workaround) ---"
+  echo "tun-mtu 1300"
+  echo "mssfix 1260"; } >> "$OUT_DIR/claude-gw.ovpn"
 { echo "<cert>"; cat "$PKI_DIR/${PEER_NAME}.crt"; echo "</cert>"
   echo "<key>"; cat "$PKI_DIR/${PEER_NAME}.key"; echo "</key>"; } >> "$OUT_DIR/claude-gw.ovpn"
 
@@ -143,7 +153,9 @@ echo "  1. Install the AWS VPN Client if you don't have it:"
 echo "       brew install --cask aws-vpn-client"
 echo "  2. Open AWS VPN Client -> File > Manage Profiles > Add Profile"
 echo "     Point it at:  \$HERE/claude-gw.ovpn"
-echo "  3. Connect the VPN. If /login later hangs, run:"
+echo "  3. Connect the VPN. The profile pins the tunnel MTU to 1300 already, so"
+echo "     /login should not hang. If it still does (e.g. the client ignored the"
+echo "     baked-in clamp), force it on the live interface:"
 echo "       # find your VPN interface (the utunN with a 10.30.x.x address):"
 echo "       for i in \\\$(ifconfig -l); do ifconfig \\\$i 2>/dev/null | grep -q 'inet 10.30\\.' && echo \\\$i; done"
 echo "       sudo ifconfig <utunN> mtu 1300     # replace <utunN> with what you found"
@@ -204,12 +216,15 @@ runs against Bedrock in the admin's AWS account. You don't need any AWS credenti
 
 ## Troubleshooting
 
-**"/login hangs" or curl times out after VPN connect** — MTU issue. Find your VPN tunnel and lower its MTU:
+**"/login hangs" or curl times out after VPN connect** — MTU black hole. Your
+\`.ovpn\` already pins \`tun-mtu 1300\` / \`mssfix 1260\`, which fixes this for most
+clients. If it still hangs, your client ignored the baked-in clamp — force it on
+the live tunnel:
 \`\`\`bash
 for i in \$(ifconfig -l); do ifconfig \$i 2>/dev/null | grep -q 'inet 10.30\\.' && echo \$i; done
 sudo ifconfig <utunN> mtu 1300     # replace <utunN> with what the first command showed
 \`\`\`
-This resets on every VPN reconnect — re-apply after each reconnect.
+This manual override resets on every VPN reconnect — re-apply after each reconnect.
 
 **"Couldn't load settings from Cloud gateway <old-host>"** — stale cache pinning
 an old gateway hostname or session. Clear all three cache locations, then retry:
@@ -225,7 +240,9 @@ model to the gateway allowlist. Report it back with the exact model id.
 
 ## Notes
 
-- The VPN client MTU **resets to 1500 on every reconnect**. Keep the 1300 workaround handy.
+- The \`.ovpn\` pins the tunnel MTU to 1300 (\`tun-mtu\`/\`mssfix\`) so it survives
+  reconnects. If you ever set it manually with \`ifconfig\`, that override **resets
+  to 1500 on every reconnect** — keep the 1300 workaround above handy.
 - Your \`.ovpn\` file is sensitive (contains your private client cert). Don't share it.
 - To offboard: the admin revokes your Cognito user + rotates the VPN client cert.
 EOF
