@@ -1,0 +1,2 @@
+# The deck is built with python-pptx (build_deck.py) — no Node deps needed.
+node_modules/
