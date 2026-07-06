@@ -208,6 +208,15 @@ spend caps are optional add-ons. See [`docs/CONFIG.md`](docs/CONFIG.md) for the
 `gateway.yaml` sections behind each, and [`docs/GUIDE.md`](docs/GUIDE.md) for the
 deploy walkthrough.
 
+> **Long "thinking" turns and the ALB idle timeout.** Claude Code holds one
+> streaming connection open per turn; during extended thinking no bytes cross the
+> ALB. AWS ALBs default to a **60-second** idle timeout, which closes that
+> connection mid-stream (`API Error: Connection closed mid-response`) even though
+> the network is healthy. The stack sets `idle_timeout.timeout_seconds` to the ALB
+> max via the `AlbIdleTimeoutSeconds` parameter (default `4000`); lower it only if
+> you have a reason to. A change here is an in-place ALB update — redeploy the
+> gateway stack to apply.
+
 ## Cost note
 
 No gateway license fee — you pay only for the AWS infrastructure plus your normal

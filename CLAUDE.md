@@ -83,6 +83,14 @@ running:
 - **ALB must stay `Scheme: internal` + `IpAddressType: ipv4`.** Claude Code's
   `/login` rejects any gateway resolving to a public IP; dual-stack internal
   ALBs return public-range IPv6.
+- **ALB `idle_timeout` must be raised above the 60s default.** Claude Code holds
+  one streaming connection open per turn; during extended thinking no bytes cross
+  the ALB, so the 60s default closes it mid-stream → `Connection closed
+  mid-response`. Every raw network test (ping/curl/TLS) still passes, which makes
+  this look like a client/VPN bug when it isn't. Set via the
+  `AlbIdleTimeoutSeconds` param (default 4000 = ALB max) →
+  `LoadBalancerAttributes: idle_timeout.timeout_seconds`. Applying a change is an
+  in-place ALB update (no replacement), but still needs a stack redeploy.
 - **Public cert + private ALB is intentional.** ACM validates against a public
   DNS name; the A-record aliases the internal ALB → resolves to `10.20.x.x`.
 - **Gateway config lives in the task definition**, not SSM. Changing the
