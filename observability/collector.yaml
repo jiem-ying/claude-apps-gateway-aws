@@ -82,9 +82,24 @@ Parameters:
     Default: 500
     Description: Alarm when total daily Claude cost.usage (Sum over 1 day) exceeds this many USD.
 
+  # --- per-user cost alarm (real-time notification without blocking) ---
+  # Showcase of "alert-only" governance: watch one developer's spend and NOTIFY via SNS
+  # (email / Slack / PagerDuty / Lambda) without ever blocking them. Pair with a per-user
+  # `amount: null` spend override so they're notified but never locked out. The hard
+  # dollar CAP lives in the gateway's spend API; this is the observe-and-fan-out half.
+  PerUserAlarmEmailAddress:
+    Type: String
+    Default: ""
+    Description: (Optional) The user.email to raise a per-user daily-cost alarm on, e.g. jiemying@example.com. Must match the identity the gateway stamps on telemetry. Empty = no per-user alarm.
+  PerUserDailyThresholdUsd:
+    Type: Number
+    Default: 88
+    Description: Per-user daily Claude cost.usage (Sum over 1 day) that triggers the per-user alarm. Notify-only — never caps the user. Only used when PerUserAlarmEmailAddress is set.
+
 Conditions:
   HasCertificateArn: !Not [!Equals [!Ref CertificateArn, ""]]
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+  HasPerUserAlarm: !Not [!Equals [!Ref PerUserAlarmEmailAddress, ""]]
   ManagedCertMode: !And
     - !Not [!Equals [!Ref PublicHostedZoneId, ""]]
     - !Not [!Equals [!Ref DomainName, ""]]
@@ -476,19 +491,19 @@ Resources:
 
             { "type": "text", "x": 0, "y": 2, "width": 24, "height": 1, "properties": { "markdown": "## Cost & token usage" } },
             {
-              "type": "metric", "x": 0, "y": 3, "width": 12, "height": 6,
+              "type": "log", "x": 0, "y": 3, "width": 12, "height": 6,
               "properties": {
-                "title": "Cost by user (top spenders, USD/day)",
-                "region": "${AWS::Region}", "view": "bar", "period": 86400,
-                "metrics": [ [ { "expression": "SEARCH('{${MetricsNamespace},user.email,OTelLib} MetricName=\"claude_code.cost.usage\"', 'Sum', 86400)", "id": "e1", "region": "${AWS::Region}" } ] ]
+                "title": "Cost by user (one bar per developer, USD over selected range)",
+                "region": "${AWS::Region}", "view": "bar", "stacked": false,
+                "query": "SOURCE '/aws/claude-gateway/metrics' | filter ispresent(`user.email`) and ispresent(`claude_code.cost.usage`)\n| stats sum(`claude_code.cost.usage`) as cost_usd by `user.email`\n| sort cost_usd desc"
               }
             },
             {
-              "type": "metric", "x": 12, "y": 3, "width": 12, "height": 6,
+              "type": "log", "x": 12, "y": 3, "width": 12, "height": 6,
               "properties": {
-                "title": "Cost by team/role (user.groups, USD/day)",
-                "region": "${AWS::Region}", "view": "bar", "period": 86400,
-                "metrics": [ [ { "expression": "SEARCH('{${MetricsNamespace},user.groups,OTelLib} MetricName=\"claude_code.cost.usage\"', 'Sum', 86400)", "id": "e2", "region": "${AWS::Region}" } ] ]
+                "title": "Cost by team/role (one bar per group, USD over selected range)",
+                "region": "${AWS::Region}", "view": "bar", "stacked": false,
+                "query": "SOURCE '/aws/claude-gateway/metrics' | filter ispresent(`user.groups`) and ispresent(`claude_code.cost.usage`)\n| stats sum(`claude_code.cost.usage`) as cost_usd by `user.groups`\n| sort cost_usd desc"
               }
             },
             {
@@ -602,6 +617,24 @@ Resources:
                 "region": "${AWS::Region}", "view": "table",
                 "query": "SOURCE '/aws/claude-gateway/events' | filter attributes.event_name = 'api_request'\n| stats sum(attributes.cost_usd) as cost_usd, sum(attributes.input_tokens) as in_tokens, sum(attributes.output_tokens) as out_tokens by attributes.`user.groups`\n| sort cost_usd desc"
               }
+            },
+
+            { "type": "text", "x": 0, "y": 48, "width": 24, "height": 2, "properties": { "markdown": "## Cost breakdown by model & agent\nEach model / agent gets its **own bar** and totals over the **time range you select** (top-right picker). `agent.name` is the subagent that ran the inference: **Explore**, **Plan**, **general-purpose**, **claude-code-guide** are built-ins; **custom** is a user-defined subagent or main-loop work not tagged as a named agent." } },
+            {
+              "type": "log", "x": 0, "y": 50, "width": 12, "height": 6,
+              "properties": {
+                "title": "Cost by model (one bar per model, USD over selected range)",
+                "region": "${AWS::Region}", "view": "bar", "stacked": false,
+                "query": "SOURCE '/aws/claude-gateway/metrics' | filter ispresent(`model`) and ispresent(`claude_code.cost.usage`)\n| stats sum(`claude_code.cost.usage`) as cost_usd by `model`\n| sort cost_usd desc\n| limit 20"
+              }
+            },
+            {
+              "type": "log", "x": 12, "y": 50, "width": 12, "height": 6,
+              "properties": {
+                "title": "Cost by agent / subagent (one bar per agent, USD over selected range)",
+                "region": "${AWS::Region}", "view": "bar", "stacked": false,
+                "query": "SOURCE '/aws/claude-gateway/metrics' | filter ispresent(`agent.name`) and ispresent(`claude_code.cost.usage`)\n| stats sum(`claude_code.cost.usage`) as cost_usd by `agent.name`\n| sort cost_usd desc\n| limit 20"
+              }
             }
           ]
         }
@@ -653,6 +686,50 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmTopic]
+
+  # (1b) PER-USER cost alarm — real-time notification WITHOUT blocking.
+  # Alerts on one developer's own daily spend and fans out through a dedicated SNS
+  # topic. This is the "alert-only" half of governance: pair it with a per-user
+  # `amount: null` spend override (see slides/DEMO-RUNBOOK.md 1b) so the person is
+  # NOTIFIED but never locked out — the hard dollar cap belongs to whoever you DO
+  # want capped. Keys on the [user.email, OTelLib] dimension the awsemf exporter
+  # already promotes (see metric_declarations above). CloudWatch alarm periods cap
+  # at 1 day, so this is a DAILY run-rate alarm; the monthly ceiling lives in the
+  # spend API. Only created when PerUserAlarmEmailAddress is set.
+  PerUserAlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasPerUserAlarm
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-user-cost"
+      DisplayName: Claude Gateway per-user cost alert
+  # Subscribe the developer directly so it's THEIR channel. The topic is also a
+  # clean hook point — add Lambda / HTTPS / Slack-chatbot / PagerDuty subscriptions
+  # to trigger downstream actionables (auto-raise a spend cap, open a ticket, etc.).
+  PerUserAlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasPerUserAlarm
+    Properties:
+      TopicArn: !Ref PerUserAlarmTopic
+      Protocol: email
+      Endpoint: !Ref PerUserAlarmEmailAddress
+  PerUserDailyCostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasPerUserAlarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-user-cost-${PerUserAlarmEmailAddress}"
+      AlarmDescription: !Sub "Daily Claude cost.usage for ${PerUserAlarmEmailAddress} exceeded ${PerUserDailyThresholdUsd} USD (notify only; not a hard cap)."
+      Namespace: !Ref MetricsNamespace
+      MetricName: claude_code.cost.usage
+      Dimensions:
+        - { Name: user.email, Value: !Ref PerUserAlarmEmailAddress }
+        - { Name: OTelLib, Value: com.anthropic.claude_code }
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: !Ref PerUserDailyThresholdUsd
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref PerUserAlarmTopic]
 
   # (2) Cost anomaly — inline ANOMALY_DETECTION_BAND auto-provisions the detector.
   AlarmCostAnomaly:
