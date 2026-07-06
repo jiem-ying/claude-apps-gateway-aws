@@ -25,6 +25,8 @@
 #   FORWARD_LOGS               "true" | "false"  forward audit events too   (default: ENABLE_COLLECTOR)
 #   ALARM_EMAIL                email to subscribe to collector alarms        (default: none)
 #   DAILY_COST_THRESHOLD_USD   daily cost alarm threshold                    (default: 500)
+#   ENABLE_SPEND_CAPS          "true" | "false"  HARD 429 caps (enforced)    (default: false)
+#   GATEWAY_ADMIN_WRITE_KEY_ARN  Secrets Manager ARN of the admin key (req. if caps on)
 #   CLAUDE_VERSION             pinned binary version if BUILD_IMAGE         (default: 2.1.196)
 #
 # Plus every var deploy.sh accepts (AWS_REGION, PUBLIC_HOSTED_ZONE_ID,
@@ -160,6 +162,8 @@ if [[ "$ENABLE_COLLECTOR" == "true" ]]; then
       "VpcCidr=$VPC_CIDR_OUT" \
       "AlarmEmail=${ALARM_EMAIL:-}" \
       "DailyCostThresholdUsd=${DAILY_COST_THRESHOLD_USD:-500}" \
+      "PerUserAlarmEmailAddress=${PER_USER_ALARM_EMAIL:-}" \
+      "PerUserDailyThresholdUsd=${PER_USER_DAILY_THRESHOLD_USD:-88}" \
     --tags auto-delete=no project=claude-apps-gateway \
     --no-fail-on-empty-changeset
   COLLECTOR_URL="$(cfn describe-stacks --stack-name "$COLLECTOR_STACK" --query "Stacks[0].Outputs[?OutputKey=='CollectorEndpoint'].OutputValue" --output text)"

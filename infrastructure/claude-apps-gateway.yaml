@@ -47,6 +47,10 @@ Metadata:
       - Label: { default: "Config" }
         Parameters:
           - GatewayConfigContent
+      - Label: { default: "Spend caps (optional)" }
+        Parameters:
+          - EnableSpendCaps
+          - AdminWriteKeyArn
 
 Parameters:
   GatewayImageUri:
@@ -196,8 +200,28 @@ Parameters:
     AllowedValues: ["true", "false"]
     Description: Run RDS Multi-AZ for database failover. Recommended true for production (esp. with spend limits).
 
+  # --- spend caps (optional; hard per-user/group/org budgets enforced server-side) ---
+  EnableSpendCaps:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Enable hard spend caps. When true, the rendered config carries an admin block
+      and the task injects the GATEWAY_ADMIN_WRITE_KEY secret so the gateway serves
+      the Admin API and returns 429 to over-cap developers. Set caps via the API
+      after deploy. Default false keeps the gateway cost-tracking-only (no enforcement).
+
+  AdminWriteKeyArn:
+    Type: String
+    Default: ""
+    Description: >-
+      (Spend caps) Secrets Manager ARN holding the admin write key (the x-api-key for
+      POST/DELETE on /v1/organizations/spend_limits). Required when EnableSpendCaps=true.
+      Leave empty when caps are off.
+
 Conditions:
   HasTelemetry: !Not [!Equals [!Ref CollectorEndpoint, ""]]
+  HasSpendCaps: !Equals [!Ref EnableSpendCaps, "true"]
   IsMultiAz: !Equals [!Ref MultiAzDatabase, "true"]
   # Managed public-cert mode: public zone + domain given, and no BYO cert.
   HasCertificateArn: !Not [!Equals [!Ref CertificateArn, ""]]
@@ -599,6 +623,9 @@ Resources:
                   - !Ref DbSecret
                   - !Ref GatewayJwtSecret
                   - !Ref OidcClientSecretArn
+                  # Admin write key (spend caps) — only when enabled, else NoValue so
+                  # the list doesn't carry an empty ARN.
+                  - !If [HasSpendCaps, !Ref AdminWriteKeyArn, !Ref "AWS::NoValue"]
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -682,6 +709,14 @@ Resources:
               ValueFrom: !Ref GatewayJwtSecret
             - Name: GATEWAY_PG_PASSWORD
               ValueFrom: !Sub "${DbSecret}:password::"
+            # Spend caps: inject the admin write key only when enabled. The rendered
+            # config references ${GATEWAY_ADMIN_WRITE_KEY} in its admin block; when caps
+            # are off the config has no admin block and this secret isn't injected.
+            - !If
+              - HasSpendCaps
+              - Name: GATEWAY_ADMIN_WRITE_KEY
+                ValueFrom: !Ref AdminWriteKeyArn
+              - !Ref AWS::NoValue
           LogConfiguration:
             LogDriver: awslogs
             Options:

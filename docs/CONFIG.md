@@ -243,25 +243,90 @@ developer-side config. Key points for AWS:
   The rendered config must still fit the 4096-byte task-def budget (~3000 used;
   `logs: true` adds ~13 bytes).
 
-## Spend caps (optional)
+## Spend caps (optional — hard enforcement)
 
-Daily/weekly/monthly USD budgets per user, group, or org. Over-cap requests get a
-`429` until the period resets. Enable the admin API in the config, then set caps
-via that API (not in YAML):
+**Track vs. cap.** Telemetry (above) *tracks* cost per user/team and *alarms* when a
+threshold is crossed — it observes and notifies, it does not block. Spend caps are the
+*circuit breaker*: daily/weekly/monthly USD budgets per **user**, **group**, or **org**,
+enforced on every `/v1/messages` request. An over-cap developer gets a **`429`
+billing_error** (`x-should-retry: false`) on their next request until the period resets
+or an admin raises the cap. `count_tokens` is exempt. Enable both for the full story:
+the dashboard shows *who* is spending, the caps stop *runaway* spend on your shared
+upstream credential.
+
+### Enabling it (deployed path)
+
+`deploy.sh` / `deploy-all.sh` render the `admin:` + `enforcement:` block from env vars.
+The write key stays a `${GATEWAY_ADMIN_WRITE_KEY}` placeholder the gateway expands at
+boot — it's injected by ECS from Secrets Manager, never written into the config.
+
+```bash
+# 1. Create the admin write key secret (the x-api-key for the caps API):
+aws secretsmanager create-secret --name claude-gateway-admin-write \
+  --secret-string "$(openssl rand -base64 32)"
+
+# 2. Deploy with caps on:
+export ENABLE_SPEND_CAPS="true"
+export GATEWAY_ADMIN_WRITE_KEY_ARN="arn:aws:secretsmanager:...:secret:claude-gateway-admin-write-XXXXXX"
+export SPEND_CAP_FAIL_CLOSED="false"       # true = no unmetered spend if Postgres is down
+export ADMIN_GROUPS="platform-finops"      # optional: IdP group(s) that manage caps via JWT
+./deploy.sh
+```
+
+This renders:
 
 ```yaml
 admin:
-  write_keys: [ { id: terraform, key: "${GATEWAY_ADMIN_WRITE_KEY}" } ]
+  write_keys: [{id: ops, key: "${GATEWAY_ADMIN_WRITE_KEY}"}]
   blocked_message: "Contact your platform team to request a higher limit."
+  admin_groups: [platform-finops]
+enforcement:
+  fail_closed_on_error: false
 ```
 
+Off by default (`ENABLE_SPEND_CAPS` unset ⇒ empty block ⇒ byte-identical to a no-caps
+deploy). `deploy.sh` fails fast if you set `ENABLE_SPEND_CAPS=true` without an ARN.
+
+### Setting caps (after deploy, via the Admin API)
+
+Caps are **not** in YAML — you set them through `POST /v1/organizations/spend_limits`
+(amounts are **USD cents**, whole-number strings; `null` = unlimited, `"0"` = block all):
+
 ```bash
-# $500/developer/month org-wide default (amounts are USD cents):
+# $500/developer/month org-wide default:
 curl -X POST https://<gateway>/v1/organizations/spend_limits \
   -H "x-api-key: $GATEWAY_ADMIN_WRITE_KEY" -H "Content-Type: application/json" \
   -d '{"scope":{"type":"organization"},"amount":"50000","period":"monthly"}'
+
+# Tighter $100/day cap on the contractors group:
+curl -X POST https://<gateway>/v1/organizations/spend_limits \
+  -H "x-api-key: $GATEWAY_ADMIN_WRITE_KEY" -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"rbac_group","rbac_group_id":"contractors"},"amount":"10000","period":"daily"}'
 ```
 
-Caps are **per-seat defaults**, not shared pools. Spend is *estimated* from token
-counts at list price — a circuit breaker, not an invoice. If Postgres is down,
-enforcement fails open unless you set `enforcement.fail_closed_on_error: true`.
+- **Scopes:** `user` (by OIDC `sub`, as `scope.user_id`), `rbac_group` (IdP group name,
+  as `scope.rbac_group_id`), or `organization`. **Periods:** `daily` / `weekly` / `monthly`
+  (independent — over any one blocks).
+- **Resolution order** per period: per-user override → most-restrictive group cap → org
+  default → unlimited. Set `ADMIN_GROUPS`/`group_limit_mode` accordingly; a group/org cap
+  is a **per-seat default**, not a shared pool.
+- **Visibility:** `GET /v1/organizations/spend_limits/effective` shows each principal's
+  resolved cap + period-to-date spend (great for the demo). `GET .../audit` is the
+  mutation trail. Use `admin.read_keys` for GET-only automation.
+- **Caveat:** spend is *estimated* from token counts at list price — a circuit breaker,
+  not an invoice; reconcile against Bedrock/CUR for billing. Enforcement **fails open** by
+  default if Postgres is unreachable (keeps inference up); `SPEND_CAP_FAIL_CLOSED=true`
+  fails closed (no unmetered spend, at the cost of tying inference to the store).
+- **Storage:** enabling caps adds durable `spend` / `spend_limits` / `admin_audit` /
+  `principal_emails` tables to Postgres — set `MULTI_AZ_DB=true` and consider the RDS
+  `DeletionPolicy` for production (see the note in `infrastructure/claude-apps-gateway.yaml`).
+
+A full copy-paste demo (set a cap → trip the 429 → raise it) is in
+[`slides/DEMO-RUNBOOK.md`](../slides/DEMO-RUNBOOK.md).
+
+### What's a hotfix vs. what needs a redeploy
+
+| Change | Live? | Redeploy? |
+|--------|-------|-----------|
+| Set / change / delete a cap via the Admin API | **yes, live** (next request enforces) | no |
+| Turn caps on/off, change fail-open/closed, admin key/groups (`ENABLE_SPEND_CAPS`, …) | no | **yes** (task-def config) |

@@ -29,6 +29,15 @@
 #                                              out of the box)
 #   COLLECTOR_ENDPOINT unset             -> same as off (with a warning to prefer 'off')
 #
+# Spend caps (optional — hard per-user/group/org USD budgets, enforced server-side):
+#   ENABLE_SPEND_CAPS=true               -> turn on the Admin API + enforcement. Over-cap
+#                                           developers get 429 on /v1/messages until the
+#                                           period resets. REQUIRES GATEWAY_ADMIN_WRITE_KEY_ARN.
+#   GATEWAY_ADMIN_WRITE_KEY_ARN=arn:...  -> Secrets Manager ARN holding the admin write key
+#                                           (x-api-key for POST/DELETE on the caps API).
+#   (unset / false)                      -> caps OFF (default; observability still TRACKS cost)
+#   Caps themselves are set AFTER deploy via the Admin API, not here — see docs/CONFIG.md.
+#
 # Usage:  ./deploy.sh
 set -euo pipefail
 
@@ -65,6 +74,13 @@ FORWARD_LOGS="${FORWARD_LOGS:-false}"                 # true = also forward audi
 # weather MCP tool; everyone else is unrestricted. Empty = no managed policies.
 DENY_TOOL_GROUP="${DENY_TOOL_GROUP:-}"
 DENY_TOOLS="${DENY_TOOLS:-mcp__weather}"               # comma-separated tool rules
+# Optional spend caps: enforce hard per-user/group/org USD budgets (429 over-cap).
+# Off by default; when on, the observability stack still TRACKS cost — this CAPS it.
+ENABLE_SPEND_CAPS="${ENABLE_SPEND_CAPS:-false}"
+GATEWAY_ADMIN_WRITE_KEY_ARN="${GATEWAY_ADMIN_WRITE_KEY_ARN:-}"  # required iff ENABLE_SPEND_CAPS=true
+SPEND_CAP_FAIL_CLOSED="${SPEND_CAP_FAIL_CLOSED:-false}"  # true = block if Postgres unreachable
+SPEND_BLOCKED_MESSAGE="${SPEND_BLOCKED_MESSAGE:-Contact your platform team to request a higher limit.}"
+ADMIN_GROUPS="${ADMIN_GROUPS:-}"                       # comma-sep IdP groups granted admin via JWT
 GATEWAY_STACK="${GATEWAY_STACK:-claude-gateway}"
 
 # Fail FAST if AWS credentials are missing/expired (see lib/aws-common.sh for why
@@ -95,6 +111,16 @@ case "${COLLECTOR_ENDPOINT:-}" in
 esac
 echo "==> telemetry: $TELEMETRY_MODE"
 [[ "$TELEMETRY_MODE" != "off" ]] && echo "==> telemetry logs (audit events) forwarding: $FORWARD_LOGS"
+
+# ---- spend-caps mode (explicit) ----------------------------------------------
+# Enforcement needs an admin write key (the x-api-key for the caps API). Fail fast
+# here rather than booting a gateway whose admin block references an unset secret.
+if [[ "$ENABLE_SPEND_CAPS" == "true" ]]; then
+  : "${GATEWAY_ADMIN_WRITE_KEY_ARN:?ENABLE_SPEND_CAPS=true requires GATEWAY_ADMIN_WRITE_KEY_ARN (Secrets Manager ARN of the admin write key)}"
+  echo "==> spend caps: ON (fail_closed_on_error=$SPEND_CAP_FAIL_CLOSED). Set caps via the Admin API after deploy."
+else
+  echo "==> spend caps: off (observability still tracks cost; no hard 429 enforcement)"
+fi
 
 # ---- 1/2 choose TLS/DNS mode -------------------------------------------------
 # CONNECT_HOST is the hostname devs use — it becomes the gateway public_url (which
@@ -175,6 +201,22 @@ else
   MANAGED_BLOCK=""
 fi
 
+# Spend caps: enable the Admin API + server-side enforcement. Flow style keeps it
+# under the 4096-byte task-def config budget. The write key stays a ${VAR} the
+# gateway expands at boot (injected by ECS from Secrets Manager) — never rendered
+# into the non-secret config. Empty when disabled => empty block => caps off.
+if [[ "$ENABLE_SPEND_CAPS" == "true" ]]; then
+  ADMIN_GROUPS_LINE=""
+  if [[ -n "$ADMIN_GROUPS" ]]; then
+    ADMIN_GROUPS_YAML="[$(echo "$ADMIN_GROUPS" | sed 's/,/, /g')]"
+    ADMIN_GROUPS_LINE=$(printf '\n  admin_groups: %s' "$ADMIN_GROUPS_YAML")
+  fi
+  ADMIN_BLOCK=$(printf 'admin:\n  write_keys: [{id: ops, key: "${GATEWAY_ADMIN_WRITE_KEY}"}]\n  blocked_message: "%s"%s\nenforcement:\n  fail_closed_on_error: %s\n' \
+    "$SPEND_BLOCKED_MESSAGE" "$ADMIN_GROUPS_LINE" "$SPEND_CAP_FAIL_CLOSED")
+else
+  ADMIN_BLOCK=""
+fi
+
 # Render: strip the template's comment header, substitute placeholders.
 RENDERED="$(sed '/^# /d; /^#$/d' "$SCRIPT_DIR/gateway/gateway.yaml.example" \
   | sed \
@@ -187,6 +229,7 @@ RENDERED="$(sed '/^# /d; /^#$/d' "$SCRIPT_DIR/gateway/gateway.yaml.example" \
       -e "s#__BEDROCK_REGION__#$BEDROCK_REGION#")"
 RENDERED="${RENDERED/__MANAGED_BLOCK__/$MANAGED_BLOCK}"
 RENDERED="${RENDERED/__TELEMETRY_BLOCK__/$TELEMETRY_BLOCK}"
+RENDERED="${RENDERED/__ADMIN_BLOCK__/$ADMIN_BLOCK}"
 
 # The rendered config is injected as one ECS task-def env var, capped at 4096
 # bytes. Fail loudly here rather than getting a confusing deploy-time error.
@@ -220,6 +263,8 @@ cfn deploy --stack-name "$GATEWAY_STACK" \
     "MinTasks=$MIN_TASKS" \
     "MaxTasks=$MAX_TASKS" \
     "MultiAzDatabase=$MULTI_AZ_DB" \
+    "EnableSpendCaps=$ENABLE_SPEND_CAPS" \
+    "AdminWriteKeyArn=$GATEWAY_ADMIN_WRITE_KEY_ARN" \
     "GatewayConfigContent=$RENDERED" \
   --no-fail-on-empty-changeset
 

@@ -16,9 +16,11 @@
 #   __BEDROCK_REGION__   e.g. us-east-1
 #   __MANAGED_BLOCK__    rendered managed.policies (group RBAC), or empty (no policies)
 #   __TELEMETRY_BLOCK__  rendered telemetry section, or empty (no hard dependency)
+#   __ADMIN_BLOCK__      rendered admin + enforcement section (spend caps), or empty (off)
 #
 # Secret env vars expanded by the gateway (injected by ECS from Secrets Manager):
-#   OIDC_CLIENT_SECRET, GATEWAY_JWT_SECRET, GATEWAY_POSTGRES_URL
+#   OIDC_CLIENT_SECRET, GATEWAY_JWT_SECRET, GATEWAY_POSTGRES_URL,
+#   GATEWAY_ADMIN_WRITE_KEY (only when spend caps are enabled)
 
 listen:
   host: 0.0.0.0
@@ -133,3 +135,17 @@ __MANAGED_BLOCK__
 # stack. When a collector endpoint is supplied, it renders a forward_to block
 # that relays OTLP/HTTP metrics (identity-stamped) to your existing collector.
 __TELEMETRY_BLOCK__
+
+# Spend caps (OPTIONAL). When __ADMIN_BLOCK__ renders empty, the admin API is off
+# and no spend enforcement runs (backward-compatible default — the observability
+# stack still TRACKS cost per user/group, this is what CAPS it). When enabled it
+# renders an `admin:` block that turns on the Admin API at
+# /v1/organizations/spend_limits and enforces per-user / per-group / org caps on
+# every /v1/messages request: an over-cap developer gets a 429 billing_error until
+# the period (daily / weekly / monthly) resets or an admin raises the cap. Caps are
+# NOT set here — set them through the Admin API after deploy (see docs/CONFIG.md).
+# The write key is expanded at boot from the GATEWAY_ADMIN_WRITE_KEY secret env var.
+# enforcement.fail_closed_on_error: true blocks requests (rather than allowing them)
+# if Postgres is unreachable during the cap pre-check — no unmetered spend, at the
+# cost of tying inference availability to the store. Default false = fail open.
+__ADMIN_BLOCK__
