@@ -39,6 +39,7 @@ Metadata:
           - PrivateHostedZoneName
           - CertificateArn
           - ClientCidr
+          - AlbIdleTimeoutSeconds
       - Label: { default: "Bedrock and telemetry" }
         Parameters:
           - BedrockRegion
@@ -98,6 +99,17 @@ Parameters:
       pinned value can eventually fail to create — override with a currently
       supported version if a deploy fails on this (aws rds describe-db-engine-versions
       --engine postgres).
+
+  AlbIdleTimeoutSeconds:
+    Type: Number
+    Default: 4000
+    MinValue: 1
+    MaxValue: 4000
+    Description: >-
+      ALB connection idle timeout. Claude Code holds one streaming connection open
+      per turn; during extended thinking no bytes cross the ALB, and the AWS default
+      of 60s closes the connection mid-response ("Connection closed mid-response").
+      Set to the ALB max (4000s) so long think/plan turns survive.
 
   CollectorEndpoint:
     Type: String
@@ -456,6 +468,12 @@ Resources:
       # IPv4 only. Dual-stack internal ALBs return public-range AAAA records,
       # which makes Claude Code's /login reject the gateway as non-private.
       IpAddressType: ipv4
+      # Streamed responses keep one connection open across extended thinking, when
+      # no bytes cross the ALB. The AWS default idle timeout (60s) closes those
+      # mid-response; raise it so long think/plan turns aren't truncated.
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: !Ref AlbIdleTimeoutSeconds
       Subnets:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
