@@ -87,7 +87,7 @@ the assignment for you during onboarding.
 > refresh token, so the new `cognito:groups` claim is minted only at next sign-in.
 > Editing the *policy* itself (not membership) requires a **gateway redeploy** (its
 > config lives in the ECS task-def). See [`../docs/CONFIG.md`](../docs/CONFIG.md) →
-> *Group-based policy* and the [`weather-mcp`](../examples/weather-mcp/) demo.
+> *Group-based policy*.
 
 ## Path 3 — Okta / Entra ID / Google Workspace / Keycloak / other
 

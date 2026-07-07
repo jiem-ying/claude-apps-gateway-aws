@@ -72,8 +72,8 @@ running:
   `availableModels` gates models. **Neither is per-tool-per-model** — the model is
   chosen per session, so "model X only for tool Y" is NOT expressible.
 - **The gateway CANNOT push MCP servers** (`mcpServers` in a policy is rejected at
-  boot). Install MCP servers locally; the gateway only gates access. See
-  `examples/weather-mcp/`.
+  boot). Install MCP servers locally; the gateway only gates access to tools
+  (including built-ins like `WebFetch`), it does not distribute them.
 - **Propagation:** policy edits need a gateway **redeploy** (config-in-taskdef) +
   reach CLIs on the ~hourly settings poll; a user's new **group membership** needs a
   fresh token, i.e. **re-login** (this Cognito client has no refresh token).

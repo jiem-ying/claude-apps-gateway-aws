@@ -180,27 +180,28 @@ managed:
 
 `availableModels` is enforced both client-side (the picker) and server-side (a 400
 on an unauthorized model). `permissions` gate **tools**, model-agnostically — a rule
-like `mcp__weather` removes that whole MCP server from the group's CLI (a scoped
-`mcp__weather__get_weather` denies just one tool). Settings refresh about hourly, so
+can name a built-in tool like `WebFetch`, or an MCP server: a bare `mcp__github`
+removes that whole MCP server from the group's CLI (a scoped
+`mcp__github__create_issue` denies just one tool). Settings refresh about hourly, so
 policy changes reach developers within an hour of redeploy.
 
 **This repo now wires a policy block** (it used to be doc-only). `deploy.sh` renders
 `__MANAGED_BLOCK__` from two env vars:
 
 ```bash
-DENY_TOOL_GROUP=partners       # IdP group to restrict (empty = no policies)
-DENY_TOOLS=mcp__weather        # comma-separated tool rules to deny that group
+DENY_TOOL_GROUP=contractor     # IdP group to restrict (empty = no policies)
+DENY_TOOLS=WebFetch            # comma-separated tool rules to deny that group
 ```
 
-which produces the group-RBAC demo in [`examples/weather-mcp/`](../examples/weather-mcp/):
-`partners` keep **all models** but lose the weather tool; everyone else (`match: {}`)
-is unrestricted. Peers wanting a model restriction instead can hand-edit the block in
+which produces the canonical group-RBAC demo: the `contractor` group keeps **all
+models** but loses the built-in `WebFetch` tool; everyone else (`match: {}`) is
+unrestricted. Peers wanting a model restriction instead can hand-edit the block in
 `gateway/gateway.yaml.example` per the official config reference — keep the whole
 rendered config **under 4096 bytes** (`deploy.sh` fails the deploy if it isn't).
 
 > **The gateway cannot distribute MCP servers.** `mcpServers` inside a policy is
 > rejected at boot — the gateway gates *access* to tools, but each developer installs
-> the MCP server locally (see the weather example).
+> any MCP server locally.
 
 ### What's a hotfix vs. what needs a redeploy / re-login
 

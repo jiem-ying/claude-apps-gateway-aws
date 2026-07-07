@@ -88,8 +88,6 @@ models:
   # Full-qualified global.anthropic.* IDs (what older CLI versions and
   # explicit --model invocations send). Each maps 1:1 to the ACTIVE
   # cross-region Bedrock inference profile.
-  - id: global.anthropic.claude-opus-4-6-v1
-    upstream_model: {bedrock: global.anthropic.claude-opus-4-6-v1}
   - id: global.anthropic.claude-opus-4-7
     upstream_model: {bedrock: global.anthropic.claude-opus-4-7}
   - id: global.anthropic.claude-opus-4-8
@@ -107,8 +105,6 @@ models:
     upstream_model: {bedrock: global.anthropic.claude-fable-5}
   # Short-alias forms the modern CLI (≥2.1.198) sends after /model picker
   # selection. Route each to the same global.* Bedrock profile.
-  - id: claude-opus-4-6
-    upstream_model: {bedrock: global.anthropic.claude-opus-4-6-v1}
   - id: claude-opus-4-7
     upstream_model: {bedrock: global.anthropic.claude-opus-4-7}
   - id: claude-opus-4-8

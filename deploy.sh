@@ -70,10 +70,10 @@ MULTI_AZ_DB="${MULTI_AZ_DB:-false}"
 COLLECTOR_ENDPOINT="${COLLECTOR_ENDPOINT:-}"          # empty = no telemetry
 FORWARD_LOGS="${FORWARD_LOGS:-false}"                 # true = also forward audit events (logs)
 # Optional group RBAC: deny a set of tools to one IdP group (keeps their models).
-# e.g. DENY_TOOL_GROUP=partners DENY_TOOLS=mcp__weather  -> partners lose the
-# weather MCP tool; everyone else is unrestricted. Empty = no managed policies.
+# e.g. DENY_TOOL_GROUP=contractor DENY_TOOLS=WebFetch  -> contractors lose the
+# WebFetch tool; everyone else is unrestricted. Empty = no managed policies.
 DENY_TOOL_GROUP="${DENY_TOOL_GROUP:-}"
-DENY_TOOLS="${DENY_TOOLS:-mcp__weather}"               # comma-separated tool rules
+DENY_TOOLS="${DENY_TOOLS:-WebFetch}"                   # comma-separated tool rules
 # Optional spend caps: enforce hard per-user/group/org USD budgets (429 over-cap).
 # Off by default; when on, the observability stack still TRACKS cost — this CAPS it.
 ENABLE_SPEND_CAPS="${ENABLE_SPEND_CAPS:-false}"

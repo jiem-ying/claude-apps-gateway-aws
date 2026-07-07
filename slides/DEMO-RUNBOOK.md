@@ -45,7 +45,8 @@ If you're setting this up from scratch on a *different* deployment, see
 export GW="https://claude-gateway.jiemying.people.aws.dev"
 export AWS_PROFILE=sso-management
 export ADMIN_KEY=$(aws secretsmanager get-secret-value \
-  --secret-id claude-gateway-admin-write --query SecretString --output text)
+  --secret-id claude-gateway-admin-write --region ap-southeast-2 \
+  --query SecretString --output text)
 
 # Sanity check — should return the current list of caps (may be empty):
 curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" | jq
@@ -78,23 +79,46 @@ the whole org shares."*
 
 ### Step 2 — Watch the spend climb  *(Terminal A)*
 
-This is the "who's near their ceiling" view — resolved cap + spend-to-date, top
-spender first:
+The `effective` endpoint is the "who is near their ceiling" view. For each
+principal it returns the resolved cap alongside the spend so far in the period,
+sorted with the top spender first. This is the live meter you re-run throughout
+the demo — there is no Claude Code slash command involved, it is just this
+`curl` against the spend-limits API:
 
 ```bash
 curl -sS "$GW/v1/organizations/spend_limits/effective?period[]=daily&sort=spend_desc" \
   -H "x-api-key: $ADMIN_KEY" \
-  | jq '.data[] | {user: .actor.email_address, spent: .current_spend, cap: .limit_amount}'
+  | jq '.data[] | {user: .actor.email_address, spent: .period_to_date_spend, cap: .amount}'
 ```
 
-Now spend against it in **Terminal B** (a couple of real turns):
+The API field for spend so far is `period_to_date_spend`, and the resolved cap is
+`amount` (in US cents; `null` means unlimited). A principal only appears in this
+view after they have sent at least one request in the period, so `jiemying-target`
+will not be listed until they spend. Note also that the unfiltered daily query
+above returns the real figures; the `?q=<email>` filtered form returns hollow
+rows and should not be used as the meter.
+
+Now generate spend in **Terminal B**. The prompt below is deliberately verbose so
+each turn produces a large completion (output tokens dominate the cost), and it
+tells Claude to read files but never to write them, so your working tree stays
+untouched:
 
 ```bash
-claude -p "Explain this repository's deploy flow in detail, then draft a README section for it."
+claude -p "Analysis only — do not create, edit, or write any files. Read deploy.sh, deploy-all.sh, and infrastructure/claude-apps-gateway.yaml, then write an exhaustive, verbose architecture review of roughly 2000 words covering every CloudFormation resource and its purpose, the TLS mode precedence, the telemetry modes, the RBAC model, and the spend-cap enforcement path."
 ```
 
-Re-run the `/effective` command in Terminal A between turns to show the number
-climbing toward `50`.
+A single Opus turn is only a few cents, so you will usually need several turns to
+cross the 50-cent ceiling. To avoid retyping, run a short loop — the iteration
+number keeps each turn distinct so none of them is served from cache:
+
+```bash
+for i in 1 2 3 4 5; do
+  claude -p "Analysis only — do not create, edit, or write any files. Iteration $i: write a fresh, detailed essay of roughly 2500 words on AWS networking best practices for private ALBs, VPC design, and TLS termination. Do not repeat earlier iterations."
+done
+```
+
+Re-run the `effective` meter in Terminal A between turns and watch `spent` climb
+toward `50`.
 
 ---
 
@@ -108,7 +132,11 @@ Once `jiemying-target` crosses 50 cents for the day, the **next request is refus
 ```
 
 In Claude Code the turn simply fails with that message. **This is the circuit
-breaker** — one runaway contractor can't drain the shared bill.
+breaker** — one runaway contractor cannot drain the shared bill.
+
+Token accounting can lag a turn behind the meter, so if the reported spend is
+close to `50` but a request still succeeds, run one more turn rather than
+assuming enforcement has stalled.
 
 ---
 
@@ -144,9 +172,12 @@ A **per-user cap always wins** over any group/org cap. To make sure *you*
 (`jiemying`) are never locked out, give yourself an explicit "unlimited":
 
 ```bash
-# Find your OIDC sub (the API keys on sub, not username):
-curl -sS "$GW/v1/organizations/spend_limits/effective?q=jiemying%40amazon.com" \
-  -H "x-api-key: $ADMIN_KEY" | jq '.data[] | {user_id, email: .actor.email_address}'
+# Find your OIDC sub (the API keys on the sub, not the username). Query the
+# unfiltered daily view and pick your row out with jq — the ?q= filter returns
+# hollow rows without a user_id, so it cannot be used to resolve a sub:
+curl -sS "$GW/v1/organizations/spend_limits/effective?period[]=daily" \
+  -H "x-api-key: $ADMIN_KEY" \
+  | jq '.data[] | {user_id: .actor.user_id, email: .actor.email_address}'
 
 export MY_SUB="<sub-from-above>"
 
@@ -161,7 +192,10 @@ The "alert-only" half (get *notified* when you spend a lot, without being
 
 ---
 
-### Reset the demo  *(Terminal A)*
+### Reset the quota cap  *(Terminal A)*
+
+Delete the contractor cap as soon as you finish Part 1, so no real contractor is
+left capped on the shared deployment:
 
 ```bash
 # List caps, find the contractor cap's spl_ id, then delete it:
@@ -170,42 +204,96 @@ curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" \
 curl -sS -X DELETE "$GW/v1/organizations/spend_limits/<spl_id>" -H "x-api-key: $ADMIN_KEY" | jq
 ```
 
+The full teardown for everything the demo changes — this cap plus the RBAC deny
+and the demo login — is collected in [Cleanup](#cleanup-after-the-demo) at the end.
+
 ---
 
 ## Part 2 — RBAC: deny a tool to one team
 
-Group access is set at deploy time (`DENY_TOOL_GROUP` / `DENY_TOOLS`). Example —
-take the weather tool away from the `partners` group, leave everyone else alone:
+Unlike the quota cap, group access is set at **deploy time** through the
+`DENY_TOOL_GROUP` and `DENY_TOOLS` variables, so it involves a gateway redeploy
+rather than a live API call — which is exactly why it is **pre-staged, not run
+live in the demo**. On this deployment the `contractor` group already has the
+built-in `WebFetch` tool denied (every other group is untouched), so in the room
+you skip straight to showing the refusal. There is no waiting on an ECS cycle in
+front of the audience.
+
+The rest of this section documents how that deny was deployed, for reference and
+for reproducing it on another environment.
+
+**Reuse the deployment's existing environment, then add the two deny variables.**
+A bare `./deploy.sh` will fail on the first missing required variable, and if some
+variables happen to be set but `ENABLE_SPEND_CAPS` is not, the redeploy would turn
+the Part 1 enforcement back off. Source the same profile this gateway was deployed
+from and keep spend caps enabled:
 
 ```bash
-export DENY_TOOL_GROUP=partners
-export DENY_TOOLS="mcp__weather"     # whole server; or mcp__weather__get_weather for one tool
+source config/<profile-you-deployed-with>.env   # restores OIDC, cert, image, etc.
+export ENABLE_SPEND_CAPS=true                    # keep the Part 1 enforcement on
+export GATEWAY_ADMIN_WRITE_KEY_ARN=<same ARN used originally>
+export DENY_TOOL_GROUP=contractor
+export DENY_TOOLS="WebFetch"                      # a bare mcp__<server> denies a whole MCP server
 ./deploy.sh
 ```
 
-- A **partners** user loses that tool. A denied **model** is rejected at the API
-  (`400`) — not just hidden in the picker, so a patched client can't get around it.
-- **Everyone else** is unchanged.
-- **Propagation:** a policy edit reaches signed-in CLIs on their next hourly poll
-  after redeploy; a **change of team membership** takes effect at the user's next
-  `/login`.
+The deny policy is rendered into the task definition, which means it takes effect
+in two stages rather than instantly (this is why it is pre-staged):
 
-Per-team model allowlists work the same way (`availableModels` +
+1. The redeploy creates a new task-definition revision and ECS cycles the task,
+   which takes a few minutes.
+2. A signed-in CLI then only adopts the new policy on its roughly hourly
+   managed-settings poll. To show the change inside a demo window, have the user
+   restart Claude Code (or `/logout` then `/login`) so it re-fetches settings
+   immediately instead of waiting for the next poll.
+
+Once it has propagated:
+
+- A **contractor** user (for example `jiemying-target`) no longer has `WebFetch`
+  in the session — the policy removes it — whereas a user in another group (such
+  as your own `platform` group) still has it. Note that the tool is *filtered out*
+  of the contractor's session rather than rejected mid-call, so the model will
+  happily reach the same goal another way (for example `curl` via Bash) unless you
+  either deny those tools too or instruct it not to substitute. For a clean
+  refusal in a demo, tell it explicitly not to route around the missing tool:
+  ```bash
+  claude -p "Use the WebFetch tool to retrieve https://example.com and summarize it. Do not use Bash, curl, wget, or any other tool as a substitute — if WebFetch is unavailable, stop and tell me it was denied."
+  ```
+  A denied **model**, by contrast, is rejected at the API with a `400` rather than
+  merely hidden in the picker, so a patched client cannot reach around it.
+- **Every other group** is unchanged.
+- **Propagation:** a policy edit reaches signed-in CLIs on their next hourly poll
+  after the redeploy, and a change of team membership takes effect at the user's
+  next `/login`.
+
+Per-team model allowlists work the same way (`availableModels` and
 `enforceAvailableModels: true` in the policy — see `docs/CONFIG.md`).
 
 ---
 
 ## Part 3 — Observability: the dashboard
 
-Open **CloudWatch → Dashboards → `claude-gateway-collector-usage`**. Set the time
-picker (top-right) to **1 week** so the bars have data.
+This follows naturally from Part 2: the same contractor whose spend you capped
+and whose tool you denied is now a labelled line in the cost views. Open
+**CloudWatch → Dashboards → `claude-gateway-collector-usage`** and set the time
+picker (top-right) to a window that covers the demo — **the last 1–3 hours** for
+data you just generated, or **1 week** for a fuller history.
 
 - **Cost by user / team / model / agent** — one labeled bar each, totalling over
-  the selected range. `contractor` shows as its own bar next to `platform`.
+  the selected range. `contractor` (`jiemying-target`) shows as its own bar next
+  to `platform` (you). This is the "every number carries a name" attribution
+  story, and it is driven by the metrics stream, which is live and populated.
 - **Token usage by type and model** — the time-series trends.
-- **Governance (audit) widgets** — tool accept-vs-reject, top rejections by user,
-  auth events. These read the events log; they populate as new traffic runs
-  through the log-forwarding tasks.
+
+> **Audit (events) widgets — know before you demo.** The tool accept-vs-reject,
+> top-rejections, and auth widgets read the `/aws/claude-gateway/events` log, which
+> is separate from the metrics stream. Two things make it easy to over-promise:
+> a group tool-deny is enforced by removing the tool from the session (the client
+> never issues a rejected call, so it may not emit a `tool_decision` event at all),
+> and the events pipeline has to be fully wired end to end before anything lands
+> there. Verify the log group has a non-zero `storedBytes` **before** you rely on
+> these widgets in front of an audience — if it is empty, narrate the tool deny
+> from Part 2 instead and keep the dashboard portion on the cost views.
 
 **Alarms** (CloudWatch → Alarms) fire into SNS → email / Slack / PagerDuty:
 daily-cost threshold, cost anomaly, tool-rejection bursts, API errors, plus an
@@ -218,13 +306,54 @@ also a clean hook point for a Lambda that could, say, auto-adjust a cap.
 
 ---
 
+## Cleanup after the demo
+
+The demo changes three pieces of live state on a shared deployment. Only the first
+needs to be reverted; the other two are intentional and stay.
+
+**1. Delete the quota cap — required.**  The 50-cent contractor cap is a hard
+`429` on a real IdP group. Remove it as soon as Part 1 is done so no genuine
+contractor is left capped:
+
+```bash
+# List caps, copy the contractor cap's spl_ id, then delete it:
+curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" \
+  | jq '.data[] | {id, scope, amount, period}'
+curl -sS -X DELETE "$GW/v1/organizations/spend_limits/<spl_id>" -H "x-api-key: $ADMIN_KEY" | jq
+
+# Confirm it is gone (the list no longer shows a contractor cap):
+curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" \
+  | jq '.data[] | {id, scope, amount, period}'
+```
+
+If you added the per-user `amount:null` override for yourself in the Bonus step,
+delete that the same way (find its `spl_` id in the list, then `DELETE` it).
+
+**2. The contractor `WebFetch` deny — leave it live.**  This is now the intended
+steady state of the deployment, not demo scaffolding, so there is nothing to
+revert. It only reverts if you redeploy without `DENY_TOOL_GROUP`/`DENY_TOOLS`;
+don't do that unless you actually want contractors to regain `WebFetch`.
+
+**3. The demo login — rotate when the demo run is over.**  `jiemying-target` is a
+real Cognito user. When you are finished demoing, reset its password (and, if it
+was created only for this, consider disabling the user) so the shared password is
+no longer valid:
+
+```bash
+aws cognito-idp admin-set-user-password --region ap-southeast-2 \
+  --user-pool-id ap-southeast-2_YpOBNdHPj --username jiemying-target \
+  --password "$(openssl rand -base64 18)" --permanent
+```
+
+---
+
 ## One-page cheat sheet
 
 ```bash
 # setup (Terminal A)
 export GW="https://claude-gateway.jiemying.people.aws.dev"
 export AWS_PROFILE=sso-management
-export ADMIN_KEY=$(aws secretsmanager get-secret-value --secret-id claude-gateway-admin-write --query SecretString --output text)
+export ADMIN_KEY=$(aws secretsmanager get-secret-value --secret-id claude-gateway-admin-write --region ap-southeast-2 --query SecretString --output text)
 
 # 1. cap contractor at $0.50/day
 curl -sS -X POST "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" -H "Content-Type: application/json" \
@@ -232,10 +361,12 @@ curl -sS -X POST "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" 
 
 # 2. watch spend (re-run between turns)
 curl -sS "$GW/v1/organizations/spend_limits/effective?period[]=daily&sort=spend_desc" -H "x-api-key: $ADMIN_KEY" \
-  | jq '.data[] | {user:.actor.email_address, spent:.current_spend, cap:.limit_amount}'
+  | jq '.data[] | {user:.actor.email_address, spent:.period_to_date_spend, cap:.amount}'
 
-# 3. (Terminal B) spend as jiemying-target until 429
-claude -p "Explain this repo's deploy flow, then draft a README section."
+# 3. (Terminal B) spend as jiemying-target until 429 (read-only, no file writes)
+for i in 1 2 3 4 5; do
+  claude -p "Analysis only — do not create, edit, or write any files. Iteration $i: write a detailed essay of roughly 2500 words on AWS networking best practices for private ALBs, VPC design, and TLS termination. Do not repeat earlier iterations."
+done
 
 # 4. raise to $5/day → next request works
 curl -sS -X POST "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" -H "Content-Type: application/json" \
@@ -252,15 +383,19 @@ curl -sS "$GW/v1/organizations/spend_limits/audit?limit=5" -H "x-api-key: $ADMIN
 Only needed on a **fresh** deployment where the admin API isn't enabled yet (this
 environment already has it). Two one-time steps:
 
+Create the secret in the **same region as the gateway deployment** (this one is
+`ap-southeast-2`); pass `--region` on every `secretsmanager` call, or set
+`AWS_REGION`, so reads later resolve to the right region.
+
 ```bash
 # 1. Create the admin write key secret (the x-api-key for the caps API):
 aws secretsmanager create-secret --name claude-gateway-admin-write \
-  --secret-string "$(openssl rand -base64 32)"
+  --region ap-southeast-2 --secret-string "$(openssl rand -base64 32)"
 
 # 2. Redeploy the gateway with enforcement on:
 export ENABLE_SPEND_CAPS=true
 export GATEWAY_ADMIN_WRITE_KEY_ARN=$(aws secretsmanager describe-secret \
-  --secret-id claude-gateway-admin-write --query ARN --output text)
+  --secret-id claude-gateway-admin-write --region ap-southeast-2 --query ARN --output text)
 export SPEND_CAP_FAIL_CLOSED=false     # keep inference up if Postgres blips
 ./deploy.sh
 ```
