@@ -308,36 +308,53 @@ also a clean hook point for a Lambda that could, say, auto-adjust a cap.
 
 ## Cleanup after the demo
 
-The demo changes three pieces of live state on a shared deployment. Only the first
-needs to be reverted; the other two are intentional and stay.
+The demo changes three pieces of live state on a shared deployment. Only the
+spend caps need to be reverted; the other two are intentional and stay.
 
-**1. Delete the quota cap — required.**  The 50-cent contractor cap is a hard
-`429` on a real IdP group. Remove it as soon as Part 1 is done so no genuine
-contractor is left capped:
+**1. Delete the spend caps — required.**  The demo leaves two caps: the contractor
+group cap (a hard `429` on a real IdP group) and, if you ran the Bonus step, the
+per-user `amount:null` override on yourself. Remove both as soon as Part 1 is done.
+
+First list what exists so you can see the `spl_` ids:
 
 ```bash
-# List caps, copy the contractor cap's spl_ id, then delete it:
-curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" \
-  | jq '.data[] | {id, scope, amount, period}'
-curl -sS -X DELETE "$GW/v1/organizations/spend_limits/<spl_id>" -H "x-api-key: $ADMIN_KEY" | jq
-
-# Confirm it is gone (the list no longer shows a contractor cap):
 curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" \
   | jq '.data[] | {id, scope, amount, period}'
 ```
 
-If you added the per-user `amount:null` override for yourself in the Bonus step,
-delete that the same way (find its `spl_` id in the list, then `DELETE` it).
+Delete every cap in one shot (works regardless of the ids in this run):
+
+```bash
+for id in $(curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" | jq -r '.data[].id'); do
+  echo "deleting $id"
+  curl -sS -X DELETE "$GW/v1/organizations/spend_limits/$id" -H "x-api-key: $ADMIN_KEY" | jq -c
+done
+```
+
+Or delete them one at a time by id, for example:
+
+```bash
+curl -sS -X DELETE "$GW/v1/organizations/spend_limits/<spl_id>" -H "x-api-key: $ADMIN_KEY" | jq
+```
+
+Confirm the list is now empty — this is the clean end state (the WebFetch deny in
+item 2 is separate and stays):
+
+```bash
+curl -sS "$GW/v1/organizations/spend_limits" -H "x-api-key: $ADMIN_KEY" \
+  | jq '.data[] | {id, scope, amount, period}'
+```
 
 **2. The contractor `WebFetch` deny — leave it live.**  This is now the intended
 steady state of the deployment, not demo scaffolding, so there is nothing to
 revert. It only reverts if you redeploy without `DENY_TOOL_GROUP`/`DENY_TOOLS`;
 don't do that unless you actually want contractors to regain `WebFetch`.
 
-**3. The demo login — rotate when the demo run is over.**  `jiemying-target` is a
-real Cognito user. When you are finished demoing, reset its password (and, if it
-was created only for this, consider disabling the user) so the shared password is
-no longer valid:
+**3. The demo login — left as-is by choice.**  `jiemying-target` is a real Cognito
+user, but reaching this gateway requires a VPN connection into the account, so the
+shared password is not independently useful and the login is intentionally left in
+place. If that assumption ever changes (for example the gateway becomes reachable
+without the VPN), rotate the password:
 
 ```bash
 aws cognito-idp admin-set-user-password --region ap-southeast-2 \
