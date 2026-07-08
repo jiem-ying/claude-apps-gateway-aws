@@ -210,15 +210,39 @@ Logs Insights `stats … by attributes.user.groups` widgets, which split it clea
 
 When the gateway forwards logs, the structured events catalogued under **Events /
 audit logs** in the OTEL reference above land in the **`/aws/claude-gateway/events`**
-log group via the `awscloudwatchlogs` exporter, keyed by `attributes.event_name`. The
-dashboard's Logs Insights widgets query them from there.
+log group via the `awscloudwatchlogs` exporter. The dashboard's Logs Insights
+widgets query them from there.
 
-> **Field-path caveat.** The widget queries assume the exporter's JSON envelope
-> exposes event fields under `attributes.*`. The exact nesting is ADOT-version
-> dependent — after your first traffic, run one widget query via
-> `aws logs start-query` and adjust the `attributes.` prefixes (and the
-> `ApiErrorMetricFilter` pattern) if they differ. This is the single most likely
-> thing to need a tweak.
+> **Event envelope (verified against CLI 2.1.203/204).** The exporter writes one
+> JSON object per event with a top-level `body` and an `attributes.*` map. The
+> event type lives in **`body`** as `claude_code.<name>` (e.g.
+> `body = 'claude_code.tool_decision'`) — there is **no** `attributes.event_name`
+> field. The catalogued name is also in `attributes.event.name`, but that key has
+> a literal dot in it, so the widgets filter on `body` instead (and the
+> `ApiErrorMetricFilter` uses `{ $.body = "claude_code.api_error" }`). Other event
+> fields are plain dotted paths: `attributes.decision`, `attributes.tool_name`,
+> `attributes.cost_usd`, `attributes.user.email`, `attributes.user.groups` — no
+> backticks needed. If a future CLI/ADOT version changes this envelope, run one
+> widget query via `aws logs start-query` and re-check these paths.
+
+> **Auth events live in the gateway log, not the events pipeline.** `FORWARD_LOGS`
+> forwards the **CLI's** OTLP telemetry (`claude_code.*`) — tool decisions,
+> api_request, prompts, hooks. It carries **no** login/auth event. Gateway-side
+> authentication (the OIDC device flow) is server-side and lands in the gateway's
+> own container log **`/ecs/claude-gateway-gateway`** as structured JSON keyed by
+> `evt`: `device.authorize`, `device.verify`, `session.mint`, `session.refresh`,
+> and **`auth.denied`** (plus `spend.blocked`, `inference`, `managed.serve`).
+> The dashboard's "Authentication events" widget therefore sources that log group
+> directly (schema: `evt`, `result`, `email`, `client_ip`, `request_id`), not
+> `/aws/claude-gateway/events`.
+>
+> **API errors are also gateway-side.** The CLI events pipeline never emits an
+> `api_error` either — upstream (Bedrock) failures show up in
+> `/ecs/claude-gateway-gateway` as `{evt:"inference", status:<http>}` with a 4xx/5xx
+> `status`. The "API errors (recent)" widget queries that log for `status >= 400`,
+> and `ApiErrorMetricFilter` derives the `gateway.api_errors` metric (which drives
+> the `<stack>-api-errors` alarm) from the same pattern — so neither depends on
+> `FORWARD_LOGS` at all.
 
 > **Sensitivity.** Logs can carry commands, file paths, and prompts. `FORWARD_LOGS`
 > forwards event metadata (decisions, tokens, cost, identity); it does **not**

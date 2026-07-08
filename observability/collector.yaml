@@ -315,8 +315,9 @@ Resources:
               - dimensions: [[decision, OTelLib]]                        # governance: accept/reject
                 metric_name_selectors: ["claude_code.code_edit_tool.decision"]
           # OTLP logs -> a CloudWatch log group. Structured JSON envelope (raw_log
-          # omitted => false) so Logs Insights can filter on attributes.event_name,
-          # attributes.decision, attributes.tool_name, etc.
+          # omitted => false) so Logs Insights can filter on the event type via the
+          # top-level `body` (= claude_code.<name>) plus attributes.decision,
+          # attributes.tool_name, etc. See observability/README.md for the envelope.
           awscloudwatchlogs:
             log_group_name: /aws/claude-gateway/events
             log_stream_name: gateway-events
@@ -563,8 +564,8 @@ Resources:
                 "title": "Edit-tool decisions: accept vs reject",
                 "region": "${AWS::Region}", "view": "timeSeries", "stacked": true, "stat": "Sum", "period": 300,
                 "metrics": [
-                  [ "${MetricsNamespace}", "claude_code.code_edit_tool.decision", "decision", "accept" ],
-                  [ "${MetricsNamespace}", "claude_code.code_edit_tool.decision", "decision", "reject" ]
+                  [ "${MetricsNamespace}", "claude_code.code_edit_tool.decision", "decision", "accept", "OTelLib", "com.anthropic.claude_code" ],
+                  [ "${MetricsNamespace}", "claude_code.code_edit_tool.decision", "decision", "reject", "OTelLib", "com.anthropic.claude_code" ]
                 ]
               }
             },
@@ -583,7 +584,7 @@ Resources:
               "properties": {
                 "title": "Top users by tool rejections",
                 "region": "${AWS::Region}", "view": "table",
-                "query": "SOURCE '/aws/claude-gateway/events' | filter attributes.event_name = 'tool_decision' and attributes.decision = 'reject'\n| stats count(*) as rejections by attributes.`user.email`\n| sort rejections desc\n| limit 20"
+                "query": "SOURCE '/aws/claude-gateway/events' | filter body = 'claude_code.tool_decision' and attributes.decision = 'reject'\n| stats count(*) as rejections by attributes.user.email\n| sort rejections desc\n| limit 20"
               }
             },
             {
@@ -591,23 +592,23 @@ Resources:
               "properties": {
                 "title": "Blocked / asked actions by tool",
                 "region": "${AWS::Region}", "view": "bar",
-                "query": "SOURCE '/aws/claude-gateway/events' | filter attributes.event_name = 'tool_decision' and (attributes.decision = 'reject' or attributes.decision = 'ask')\n| stats count(*) as blocked by attributes.tool_name, attributes.decision\n| sort blocked desc"
+                "query": "SOURCE '/aws/claude-gateway/events' | filter body = 'claude_code.tool_decision' and (attributes.decision = 'reject' or attributes.decision = 'ask')\n| stats count(*) as blocked by attributes.tool_name, attributes.decision\n| sort blocked desc"
               }
             },
             {
               "type": "log", "x": 0, "y": 36, "width": 12, "height": 6,
               "properties": {
-                "title": "Authentication events (outcome by method)",
+                "title": "Authentication events (gateway auth log — outcome by event)",
                 "region": "${AWS::Region}", "view": "table",
-                "query": "SOURCE '/aws/claude-gateway/events' | filter attributes.event_name = 'auth'\n| stats count(*) as events by attributes.outcome, attributes.method\n| sort events desc"
+                "query": "SOURCE '/ecs/claude-gateway-gateway' | filter evt in ['device.authorize','device.verify','session.mint','session.refresh','auth.denied']\n| stats count(*) as events by evt, result\n| sort events desc"
               }
             },
             {
               "type": "log", "x": 12, "y": 36, "width": 12, "height": 6,
               "properties": {
-                "title": "API errors (recent)",
+                "title": "API errors (recent — gateway upstream 4xx/5xx)",
                 "region": "${AWS::Region}", "view": "table",
-                "query": "SOURCE '/aws/claude-gateway/events' | fields @timestamp, attributes.model, attributes.request_id, body\n| filter attributes.event_name = 'api_error'\n| sort @timestamp desc\n| limit 50"
+                "query": "SOURCE '/ecs/claude-gateway-gateway' | fields @timestamp, email, model, status, request_id, ms\n| filter evt = 'inference' and status >= 400\n| sort @timestamp desc\n| limit 50"
               }
             },
             {
@@ -615,7 +616,7 @@ Resources:
               "properties": {
                 "title": "Per-team spend (from api_request events — splits the user.groups array)",
                 "region": "${AWS::Region}", "view": "table",
-                "query": "SOURCE '/aws/claude-gateway/events' | filter attributes.event_name = 'api_request'\n| stats sum(attributes.cost_usd) as cost_usd, sum(attributes.input_tokens) as in_tokens, sum(attributes.output_tokens) as out_tokens by attributes.`user.groups`\n| sort cost_usd desc"
+                "query": "SOURCE '/aws/claude-gateway/events' | filter body = 'claude_code.api_request'\n| stats sum(attributes.cost_usd) as cost_usd, sum(attributes.input_tokens) as in_tokens, sum(attributes.output_tokens) as out_tokens by attributes.user.groups\n| sort cost_usd desc"
               }
             },
 
@@ -656,14 +657,16 @@ Resources:
       Protocol: email
       Endpoint: !Ref AlarmEmail
 
-  # api_error is a log event, not a metric — derive a count metric from the events
-  # log group so we can alarm on it. Pattern matches the structured JSON envelope.
+  # API errors are gateway-side: the CLI events pipeline never emits an api_error,
+  # but the gateway logs every upstream inference call to /ecs/claude-gateway-gateway
+  # as {evt:"inference", status:<http>}. Derive a count metric from the 4xx/5xx ones
+  # so we can alarm on it. (Note: this reads the gateway container log, not the
+  # /aws/claude-gateway/events pipeline — see observability/README.md.)
   ApiErrorMetricFilter:
     Type: AWS::Logs::MetricFilter
-    DependsOn: EventsLogGroup
     Properties:
-      LogGroupName: /aws/claude-gateway/events
-      FilterPattern: '{ $.attributes.event_name = "api_error" }'
+      LogGroupName: /ecs/claude-gateway-gateway
+      FilterPattern: '{ $.evt = "inference" && $.status >= 400 }'
       MetricTransformations:
         - MetricNamespace: !Ref MetricsNamespace
           MetricName: gateway.api_errors
