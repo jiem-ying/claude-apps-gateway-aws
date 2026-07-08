@@ -36,7 +36,7 @@ source "$SCRIPT_DIR/lib/aws-common.sh"
 # Stack names (must match the deployed stacks)
 GATEWAY_STACK="${GATEWAY_STACK:-claude-gateway}"
 VPN_STACK="${VPN_STACK:-claude-gateway-vpn}"
-COGNITO_STACK="${COGNITO_STACK:-claude-gateway-cognito-client}"
+COGNITO_STACK="${COGNITO_STACK:-claude-gateway-cognito-new}"
 
 NA_DIR="$SCRIPT_DIR/infrastructure/network-access"
 PKI_DIR="$NA_DIR/vpn-pki"
