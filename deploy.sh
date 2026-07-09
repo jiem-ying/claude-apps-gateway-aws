@@ -74,6 +74,12 @@ FORWARD_LOGS="${FORWARD_LOGS:-false}"                 # true = also forward audi
 # WebFetch tool; everyone else is unrestricted. Empty = no managed policies.
 DENY_TOOL_GROUP="${DENY_TOOL_GROUP:-}"
 DENY_TOOLS="${DENY_TOOLS:-WebFetch}"                   # comma-separated tool rules
+# Optional org-wide model allowlist: enforce a set of models on EVERY signed-in
+# user (match: {} catch-all) so a local settings.json pin cannot bypass it — the
+# gateway rejects any off-list model server-side (400). Does NOT force a default
+# model, only bounds the allowed set. Empty = no model enforcement (default).
+# List the exact ids CLIs send; include both short + global.* forms to be safe.
+ENFORCE_MODELS="${ENFORCE_MODELS:-}"                   # comma-separated model ids
 # Optional spend caps: enforce hard per-user/group/org USD budgets (429 over-cap).
 # Off by default; when on, the observability stack still TRACKS cost — this CAPS it.
 ENABLE_SPEND_CAPS="${ENABLE_SPEND_CAPS:-false}"
@@ -189,14 +195,33 @@ else
 fi
 DOMAINS_YAML="[$(echo "$ALLOWED_DOMAINS" | sed 's/,/, /g')]"
 
-# Group RBAC: deny DENY_TOOLS (comma-separated tool rules) to DENY_TOOL_GROUP;
-# everyone else (match: {}) is unrestricted. Flow style keeps it under the
-# 4096-byte task-def config budget. Empty group => empty block => no policies.
-if [[ -n "$DENY_TOOL_GROUP" ]]; then
-  DENY_TOOLS_YAML="[\"$(echo "$DENY_TOOLS" | sed 's/,/", "/g')\"]"
-  MANAGED_BLOCK=$(printf 'managed:\n  policies:\n    - match: {groups: [%s]}\n      cli: {permissions: {deny: %s}}\n    - match: {}\n' \
-    "$DENY_TOOL_GROUP" "$DENY_TOOLS_YAML")
-  echo "==> group RBAC: deny [$DENY_TOOLS] to group '$DENY_TOOL_GROUP' (all other groups unrestricted)"
+# Group RBAC: optionally deny DENY_TOOLS (comma-separated tool rules) to
+# DENY_TOOL_GROUP, and/or enforce an org-wide model allowlist (ENFORCE_MODELS) on
+# the match: {} catch-all so it applies to everyone and can't be bypassed by a
+# local settings.json pin (server rejects off-list models with a 400). Flow style
+# keeps it under the 4096-byte task-def config budget. Both empty => empty block
+# => no policies (backward-compatible).
+if [[ -n "$ENFORCE_MODELS" ]]; then
+  MODELS_YAML="[$(echo "$ENFORCE_MODELS" | sed 's/ *, */, /g')]"
+  CATCHALL_CLI=$(printf '\n      cli: {availableModels: %s, enforceAvailableModels: true}' "$MODELS_YAML")
+  echo "==> model allowlist enforced org-wide (match: {}): $ENFORCE_MODELS"
+else
+  CATCHALL_CLI=""
+fi
+if [[ -n "$DENY_TOOL_GROUP" || -n "$ENFORCE_MODELS" ]]; then
+  # Build the policy list. Group-deny rule (if any) comes first; the match: {}
+  # catch-all always comes last and carries the org-wide model allowlist (if any).
+  # Explicit $'\n' preserves the line break that command substitution would strip.
+  POLICIES=""
+  if [[ -n "$DENY_TOOL_GROUP" ]]; then
+    DENY_TOOLS_YAML="[\"$(echo "$DENY_TOOLS" | sed 's/,/", "/g')\"]"
+    POLICIES+=$(printf '    - match: {groups: [%s]}\n      cli: {permissions: {deny: %s}}' \
+      "$DENY_TOOL_GROUP" "$DENY_TOOLS_YAML")
+    POLICIES+=$'\n'
+    echo "==> group RBAC: deny [$DENY_TOOLS] to group '$DENY_TOOL_GROUP' (all other groups unrestricted)"
+  fi
+  POLICIES+="    - match: {}${CATCHALL_CLI}"
+  MANAGED_BLOCK=$(printf 'managed:\n  policies:\n%s\n' "$POLICIES")
 else
   MANAGED_BLOCK=""
 fi

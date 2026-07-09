@@ -6,7 +6,7 @@ tags: ai, aws, devops, claudeai
 
 Here's a thing that happens at almost every company that starts using AI coding tools: one developer gets an Anthropic API key, tells two colleagues, and within a week half the team has their own keys stored in `.env` files, shell profiles, and CI jobs. Someone leaves. Their key is still active somewhere. You have no idea what it's calling or how much it's spending.
 
-There's a better model. This post walks through an open-source AWS setup that lets your whole engineering team use Claude Code without a single API key or AWS credential ever touching a developer laptop — and how a few architectural tricks make it work without the usual enterprise friction.
+There's a better model. This post walks through an open-source AWS setup that lets your whole engineering team use Claude Code without a single API key or AWS credential ever touching a developer laptop. We'll cover the architectural tricks that make that work without the usual enterprise friction — and, further down, a feature that goes one step past visibility: a hard, enforced dollar limit on any one person's spend, so "no idea how much it's spending" stops being possible in the first place.
 
 ---
 
@@ -33,14 +33,16 @@ The repo that sets this all up is at [github.com/your-org/claude-apps-gateway-aw
 
 ## Up and running in one command
 
-The repo ships five `.env` profiles covering the common starting points:
+The repo ships six `.env` profiles covering the common starting points — pick the row that matches what you already have, not the one that sounds most complete:
 
 | You have… | Profile |
 |---|---|
-| Nothing yet (greenfield) | `managed-newcognito-collector-vpn.env` |
-| Existing Cognito pool | `managed-existingcognito-byotelemetry.env` |
-| Okta / Entra / any OIDC IdP | `byo-oidc-notelemetry.env` |
-| No public domain (just testing) | `selfsigned-fallback.env` |
+| Nothing yet (greenfield: new Cognito pool, bundled telemetry, bundled VPN) | `managed-newcognito-collector-vpn.env` |
+| An existing Cognito pool, and your own telemetry collector | `managed-existingcognito-byotelemetry.env` |
+| Okta / Entra / any other OIDC IdP, no telemetry yet | `byo-oidc-notelemetry.env` |
+| Okta / Entra / any other OIDC IdP, plus your own telemetry collector | `byo-oidc-byotelemetry.env` |
+| Just want to try it cheaply (new Cognito, no telemetry) | `managed-newcognito-notelemetry.env` |
+| No public domain yet | `selfsigned-fallback.env` |
 
 Copy one, fill in ~5 values (your domain, Route53 zone ID, and IdP details), and run:
 
@@ -97,28 +99,27 @@ The runtime image is `debian:stable-slim` with only `ca-certificates` added. No 
 
 ## RBAC without a new system
 
-Group-based access control is two env vars away:
+Group-based access control is two env vars away — there's no separate policy engine to stand up and no new console to learn:
 
 ```bash
-export DENY_TOOL_GROUP=contractors
-export DENY_TOOLS="mcp__bash,mcp__computer"
+export DENY_TOOL_GROUP=contractor
+export DENY_TOOLS=WebFetch
 ```
 
-`deploy.sh` renders these into a `managed.policies` block in the gateway config — a first-match policy list that denies those tools to the specified IdP group, with a catch-all that leaves everyone else unrestricted:
+`deploy.sh` renders these into a `managed.policies` block in the gateway config: a first-match, top-to-bottom policy list, with a catch-all clause that leaves everyone else unrestricted. The rendered result looks like this:
 
 ```yaml
 managed:
   policies:
-    - name: contractors-deny-shell
-      match:
-        groups: ["contractors"]
-      deny:
-        tools: ["mcp__bash", "mcp__computer"]
-    - name: everyone-else
-      match: {}
+    - match: { groups: [contractor] }
+      cli:
+        permissions: { deny: ["WebFetch"] }
+    - match: {}      # everyone else: unrestricted
 ```
 
-Model allowlists work the same way — engineering gets Opus, contractors get Haiku. Policy changes take effect on redeploy; a user's new group membership takes effect on their next `claude /login`.
+The same block can restrict which *models* a group is even offered — point contractors at Haiku while engineering keeps Opus and Sonnet — via `cli.availableModels` on a policy, and the repo wires that to a `ENFORCE_MODELS` deploy-time env var (rendered onto the `match: {}` catch-all so it applies org-wide) exactly the way the tool deny-list is. One catch that cost us real debugging time is in the Gotchas below: `availableModels` alone doesn't actually *stop* anyone until you pair it with `enforceAvailableModels: true`.
+
+One propagation quirk worth remembering: policy edits need a gateway redeploy (they live in the task definition, so a change ships as a new task-def revision that ECS cycles in). A user picking up a *new* group membership needs to `/logout` and `/login` again — this Cognito client issues no refresh token, so the `groups` claim is only minted at sign-in.
 
 ---
 
@@ -135,6 +136,38 @@ Logs Insights       → "which user spiked spend on Tuesday?"  (ad-hoc)
 
 Enable log forwarding with `FORWARD_LOGS=true`. It's off by default; metrics-only is the default.
 
+The bundled CloudWatch dashboard puts that Logs Insights query to work directly: one bar chart each for cost by user, by team, by model, and by agent, totalled over whatever time window you're looking at. That replaced an earlier version built on fixed one-day metric widgets, which had a habit of clumping everyone's spend into a single indistinguishable bar — useful for noticing *that* spend happened, useless for figuring out *whose*. There's also an optional per-user daily-cost alarm (set `PerUserAlarmEmailAddress` on the observability stack) that fires its own SNS topic. It's notify-only today, but it's a clean hook if you later want to wire an automated response to it.
+
+---
+
+## From visibility to a hard stop: spend caps
+
+A dashboard and an alarm are good for noticing a problem. Neither one stops it from happening while you're asleep — that's the gap spend caps are built to close.
+
+Telemetry, described above, *tracks* spend and *notifies* you once it crosses a threshold you set. Spend caps go a step further and *enforce* a budget on every single request. Set a daily, weekly, or monthly USD limit — per user, per IdP group, or for the whole org — and the moment someone crosses it, their next `/v1/messages` call comes back with a `429 billing_error` instead of running. Nobody has to notice and go revoke a credential; the gateway does it inline.
+
+Turning it on is, again, a small handful of env vars:
+
+```bash
+export ENABLE_SPEND_CAPS=true
+export GATEWAY_ADMIN_WRITE_KEY_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:admin-write-key
+export SPEND_CAP_FAIL_CLOSED=false   # true = block all inference if Postgres is briefly unreachable
+export ADMIN_GROUPS=platform-finops  # optional: let this IdP group manage caps with their own JWT
+./deploy.sh
+```
+
+The caps themselves aren't part of the YAML config — they're set at runtime through the gateway's admin API, so a finance or platform team can adjust a budget without waiting on a redeploy:
+
+```bash
+curl -X POST https://<gateway>/v1/organizations/spend_limits \
+  -H "x-api-key: $GATEWAY_ADMIN_WRITE_KEY" -H "Content-Type: application/json" \
+  -d '{"scope":{"type":"rbac_group","rbac_group_id":"contractors"},"amount":"10000","period":"daily"}'
+```
+
+Two things worth knowing before you flip this on. First, the amount here is estimated from token counts at list price, not drawn from an actual invoice — treat it as a circuit breaker, and reconcile against Bedrock billing or your Cost and Usage Report for the real number. Second, enforcement **fails open** by default: if Postgres is briefly unreachable, inference keeps running for everyone rather than grinding to a halt. Set `SPEND_CAP_FAIL_CLOSED=true` if a hard budget guarantee matters more to you than uptime — that's a genuine tradeoff, not a default we'd pick for you. (Enabling caps also adds a few small tables to Postgres; it doesn't change the cost math below, but it's a reason to think about RDS Multi-AZ if you're relying on this for production budget enforcement.)
+
+Turn on both features and you get the complete picture: the dashboard tells you *who* is spending, and the caps make sure no one of them spends more than you decided they should.
+
 ---
 
 ## Gotchas we hit
@@ -148,6 +181,8 @@ LoadBalancerAttributes:
 ```
 
 Configurable via the `AlbIdleTimeoutSeconds` stack parameter. If you see mid-response drops that correlate with long thinking pauses (not with payload size or flaky Wi-Fi), this is almost always the cause.
+
+**A local `settings.json` quietly overrides your model allowlist.** A tester couldn't select a newly-added model after logging in through the gateway, even though it was right there in the server's `models:` catalog and a teammate could pick it fine. The catalog isn't the enforcement point: it only rejects model ids the gateway has *never heard of*. Any model that IS in the catalog can still be pinned by a developer's local `~/.claude/settings.json`, and that local pin wins the `/model` picker — so "it's in the allowlist" and "everyone can actually use it" are two different facts. The real difference between the two testers turned out to be a stale local `model` setting, not the gateway at all. If you want the gateway to be *authoritative* over models — so an off-list pick is refused with a 400 no matter what's in local settings — the policy needs `enforceAvailableModels: true` on its `availableModels` list, not just the catalog entry. It bounds the allowed set; it doesn't force a default. And like every policy change, it only takes effect after a redeploy *and* each user re-logs in (no refresh token on this Cognito client).
 
 **VPN tunnel MTU.** If `/login` hangs silently, suspect the VPN MTU. At 1500, TLS handshake packets get fragmented and dropped. Fix: `sudo ifconfig utunN mtu 1300`. It resets on every VPN reconnect — put it in a connect script. (The bundled peer `.ovpn` now bakes in `tun-mtu 1300` / `mssfix 1260` so this survives reconnects.)
 

@@ -198,7 +198,7 @@ The gateway is more than a passthrough. Once it's running you get:
 | Capability | What it gives you |
 |---|---|
 | **Identity** | SSO via any OIDC IdP. The gateway mints short-lived bearer tokens; developers never hold AWS credentials. |
-| **Policy** | Model allowlists and tool permissions per IdP group — e.g. engineering gets Opus, contractors get Haiku only. Enforced server-side. |
+| **Policy** | Model allowlists and tool permissions per IdP group — e.g. engineering gets Opus, contractors get Haiku only. Enforced server-side (set `enforceAvailableModels: true`, see the gotcha below). |
 | **Telemetry** | Per-user usage/cost attribution forwarded as OTLP to any collector you run (or the bundled one). Off by default. |
 | **Routing** | The gateway holds the Bedrock credential and routes inference on developers' behalf, with optional multi-region/-account failover. |
 | **Spend caps** | Optional per-user/group/org daily/weekly/monthly budgets; over-cap requests are blocked until the period resets. |
@@ -207,6 +207,18 @@ Identity, routing, and policy are covered in this repo's config; telemetry and
 spend caps are optional add-ons. See [`docs/CONFIG.md`](docs/CONFIG.md) for the
 `gateway.yaml` sections behind each, and [`docs/GUIDE.md`](docs/GUIDE.md) for the
 deploy walkthrough.
+
+> **Model allowlists are not enforced unless you say so.** Two different knobs are
+> easy to conflate. The `models:` **catalog** only rejects model ids the gateway
+> has never heard of — it does *not* stop a developer from pinning any catalog
+> model in their local `settings.json`, and that local pin wins the `/model`
+> picker. To make the gateway authoritative — so an off-list model is refused with
+> a 400 regardless of local settings — a policy must set
+> **`enforceAvailableModels: true`** on its `availableModels` list. This repo wires
+> it via the `ENFORCE_MODELS` env var (see [`docs/CONFIG.md`](docs/CONFIG.md) →
+> *Org-wide model allowlist*). It bounds the *allowed set*; it does **not** force a
+> default model. Policy changes need a redeploy **and** each user to re-login (this
+> Cognito client has no refresh token).
 
 > **Long "thinking" turns and the ALB idle timeout.** Claude Code holds one
 > streaming connection open per turn; during extended thinking no bytes cross the

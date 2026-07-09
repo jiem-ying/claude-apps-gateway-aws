@@ -3,6 +3,12 @@
 Context for Claude Code (and other AI assistants) working in this repo. Kept
 terse and factual — enough to make good decisions, not a re-write of the docs.
 
+> **Deploying to the LIVE stack?** Read `docs/DEPLOYMENT.md` first — it records the
+> actual running deployment: profile `sso-management`, region `ap-southeast-2`,
+> stack `claude-gateway`, its parameters, the enforced governance policy, and the
+> exact deploy/verify commands. The default `BedrockCognitoFederatedRole` has NO
+> ECS/CFN access — always use `--profile sso-management`.
+
 ## What this repo is
 
 AWS-native deployment for the **[Claude Apps Gateway](https://code.claude.com/docs/en/claude-apps-gateway)**

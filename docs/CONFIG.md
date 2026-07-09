@@ -195,9 +195,28 @@ DENY_TOOLS=WebFetch            # comma-separated tool rules to deny that group
 
 which produces the canonical group-RBAC demo: the `contractor` group keeps **all
 models** but loses the built-in `WebFetch` tool; everyone else (`match: {}`) is
-unrestricted. Peers wanting a model restriction instead can hand-edit the block in
-`gateway/gateway.yaml.example` per the official config reference — keep the whole
-rendered config **under 4096 bytes** (`deploy.sh` fails the deploy if it isn't).
+unrestricted.
+
+**Org-wide model allowlist (`ENFORCE_MODELS`).** To make a set of models
+authoritative for **every** signed-in user — so a developer's local
+`settings.json` model pin can't bypass it — set:
+
+```bash
+ENFORCE_MODELS="claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5,claude-fable-5,global.anthropic.claude-fable-5"
+```
+
+`deploy.sh` renders this onto the `match: {}` catch-all as
+`availableModels: [...]` with `enforceAvailableModels: true`, so the gateway
+**rejects any off-list model server-side (400)** regardless of local settings.
+It bounds the *allowed set* only — it does **not** force a default model. List the
+exact ids CLIs send; include both the short alias and the `global.*` form for each
+model so either CLI version resolves. `ENFORCE_MODELS` and `DENY_TOOL_GROUP`
+compose (the group-deny rule renders first, the enforced catch-all last); either
+empty is fine. Keep the whole rendered config **under 4096 bytes** (`deploy.sh`
+fails the deploy if it isn't).
+
+Peers wanting per-group model restrictions instead can hand-edit the block in
+`gateway/gateway.yaml.example` per the official config reference.
 
 > **The gateway cannot distribute MCP servers.** `mcpServers` inside a policy is
 > rejected at boot — the gateway gates *access* to tools, but each developer installs
