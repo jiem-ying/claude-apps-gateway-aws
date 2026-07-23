@@ -32,7 +32,7 @@ this directory into its own repo and deploy it as-is.
 | `gateway/` | Container image (`Dockerfile`, `entrypoint.sh`), `build-and-push.sh`, and the annotated `gateway.yaml.example` config. |
 | `idp/` | OIDC identity. `cognito-create-pool.yaml` (new pool), `cognito-existing-pool.yaml` (reuse a pool), or bring any OIDC IdP. |
 | `infrastructure/network-access/` | **Optional, swappable.** How laptops reach the private ALB — "bring your own VPN/DX/TGW" is the primary path; a reference AWS Client VPN is included if you have none. |
-| `observability/` | **Optional.** Self-hosted ADOT OTEL collector (ECS + internal HTTPS ALB) → CloudWatch metrics + dashboard. For orgs with no third-party observability platform. Toggle = deploy it or not; telemetry can also point at any HTTPS OTLP collector you already run. |
+| `observability/` | **Optional.** Self-hosted ADOT OTEL collector (ECS + internal HTTPS ALB). By default it forwards metrics over native OTLP to CloudWatch, auto-populating the managed **Coding Agent Insights** dashboard (usage/cost/tokens/adoption), plus a governance/audit dashboard; a legacy EMF-metrics mode is available where Coding Agent Insights isn't. For orgs with no third-party observability platform. Toggle = deploy it or not; telemetry can also point at any HTTPS OTLP collector you already run. |
 | `deploy.sh` | One-shot deploy: cert → render config → core stack. Profile-agnostic. |
 | `docs/GUIDE.md` | The full step-by-step walkthrough, operations, resilience, and troubleshooting. |
 
@@ -199,7 +199,7 @@ The gateway is more than a passthrough. Once it's running you get:
 |---|---|
 | **Identity** | SSO via any OIDC IdP. The gateway mints short-lived bearer tokens; developers never hold AWS credentials. |
 | **Policy** | Model allowlists and tool permissions per IdP group — e.g. engineering gets Opus, contractors get Haiku only. Enforced server-side (set `enforceAvailableModels: true`, see the gotcha below). |
-| **Telemetry** | Per-user usage/cost attribution forwarded as OTLP to any collector you run (or the bundled one). Off by default. |
+| **Telemetry** | Per-user usage/cost attribution forwarded as OTLP to any collector you run (or the bundled one). By default metrics land in CloudWatch's managed **Coding Agent Insights** dashboard. Off by default. |
 | **Routing** | The gateway holds the Bedrock credential and routes inference on developers' behalf, with optional multi-region/-account failover. |
 | **Spend caps** | Optional per-user/group/org daily/weekly/monthly budgets; over-cap requests are blocked until the period resets. |
 

@@ -456,10 +456,11 @@ rect(s, 0, 0, Inches(0.28), EMU_H, SAGE)
 kicker(s, "Pillar 03 · Visibility", color=SAGE)
 title(s, "Know who spent what — and what they did")
 bullets(s, Inches(0.9), Inches(2.2), Inches(6.7), Inches(4.2), [
-    ("Every number carries a name. ", "The identity of the developer travels with each usage metric, so "
-        "cost and activity can be attributed to a person and a team without anyone configuring anything."),
-    ("The dashboard is ready on day one. ", "It shows your top spenders, usage broken down by model, and "
-        "how often tool actions are approved or rejected, all built for you in CloudWatch."),
+    ("Every number carries a name. ", "The developer's identity travels with each metric as an attribute, so "
+        "cost and activity attribute to a person and a team without anyone configuring anything."),
+    ("The usage dashboard is managed for you. ", "Metrics flow to CloudWatch and auto-populate the built-in "
+        "Coding Agent Insights dashboard — cost and tokens by user, team, and model, plus adoption — with "
+        "nothing to build. The gateway's own dashboard is then just the governance and audit companion."),
     ("Alerts can trigger action, not just email. ", "A threshold or anomaly raises a notification that "
         "can reach a person on Slack or page an on-call engineer, and can equally invoke a function that "
         "adjusts a budget on its own."),
@@ -469,7 +470,7 @@ bullets(s, Inches(0.9), Inches(2.2), Inches(6.7), Inches(4.2), [
 chart_x = Inches(8.0); chart_y = Inches(2.35); chart_w = Inches(4.4); chart_h = Inches(3.55)
 rect(s, chart_x, chart_y, chart_w, chart_h, CARD, line=LINE, line_w=Pt(1), radius=True)
 _, tf = textbox(s, chart_x + Inches(0.3), chart_y + Inches(0.22), chart_w - Inches(0.6), Inches(0.4))
-add_para(tf, "Cost by team, last 24 hours", size=13, color=INK, bold=True, font=SERIF, first=True, space_after=0)
+add_para(tf, "Coding Agent Insights — cost by team", size=13, color=INK, bold=True, font=SERIF, first=True, space_after=0)
 teams = [("Core eng", 0.92, CLAY), ("Data sci", 0.61, SKY), ("Platform", 0.44, SAGE),
          ("Contractors", 0.22, MUTE)]
 base_x = chart_x + Inches(1.5)
@@ -486,27 +487,27 @@ footer(s, 10)
 # ============================================================ SLIDE 11 — Observability how
 s = slide()
 kicker(s, "Pillar 03 · Visibility", color=SAGE)
-title(s, "Two layers: one for trends, one for the detail")
+title(s, "Two dashboards: usage you get for free, governance you own")
 _, tf = textbox(s, Inches(0.9), Inches(1.9), Inches(11.4), Inches(0.7))
-add_para(tf, "Visibility is split across two layers on purpose, so that everyday reporting stays "
-             "inexpensive while any deeper question can still be answered on demand.",
+add_para(tf, "The gateway forwards its metrics over native OTLP to CloudWatch, which splits visibility across "
+             "two dashboards on purpose — one managed by AWS for usage, one shipped by the stack for governance.",
          size=14, color=SLATE, font=SANS, first=True, space_after=0, line_spacing=1.15)
 # two columns
 colw = Inches(5.6); c1 = Inches(0.9); c2 = Inches(6.83); cy = Inches(2.75); ch = Inches(3.85)
 rect(s, c1, cy, colw, ch, CARD, line=LINE, line_w=Pt(1), radius=True)
 _, tf = textbox(s, c1 + Inches(0.32), cy + Inches(0.32), colw - Inches(0.64), ch - Inches(0.6))
-add_para(tf, "Metrics for the big picture", size=17, color=SAGE, bold=True, font=SERIF, first=True, space_after=8)
-add_para(tf, "A small, curated set of counters tracks cost and usage by person, by team, and by model. "
-             "Because the set is deliberately compact, it stays cheap to keep.",
+add_para(tf, "Coding Agent Insights, managed", size=17, color=SAGE, bold=True, font=SERIF, first=True, space_after=8)
+add_para(tf, "Native OTLP metrics auto-populate CloudWatch's built-in Coding Agent Insights dashboard — cost, "
+             "tokens, and adoption sliced by user, team, and model. You create nothing; it appears once metrics flow.",
          size=13, color=SLATE, font=SANS, space_after=8, line_spacing=1.18)
-add_para(tf, "These counters drive the dashboard's spending views and the cost alarms, whether an alarm "
-             "watches the organization's total spend or one individual's.",
+add_para(tf, "The same metrics are queryable in PromQL and drive the cost alarms, whether one watches the "
+             "organization's total spend or a single individual's.",
          size=13, color=SLATE, font=SANS, space_after=0, line_spacing=1.18)
 rect(s, c2, cy, colw, ch, CARD, line=LINE, line_w=Pt(1), radius=True)
 _, tf = textbox(s, c2 + Inches(0.32), cy + Inches(0.32), colw - Inches(0.64), ch - Inches(0.6))
-add_para(tf, "Logs for the specifics", size=17, color=SKY, bold=True, font=SERIF, first=True, space_after=8)
-add_para(tf, "Alongside the counters, the gateway records an audit event for each tool decision, sign-in, and "
-             "error, and keeps them as searchable logs rather than as separate metrics.",
+add_para(tf, "The governance dashboard, yours", size=17, color=SKY, bold=True, font=SERIF, first=True, space_after=8)
+add_para(tf, "The stack ships a lean governance dashboard for the audit signals Coding Agent Insights does not "
+             "cover — an event for each tool decision, sign-in, and error, kept as searchable logs.",
          size=13, color=SLATE, font=SANS, space_after=8, line_spacing=1.18)
 add_para(tf, "This is where you answer the pointed questions — who was denied a tool, whose sign-in failed, "
              "how spend breaks down by team — by querying the events rather than turning every one into its "
@@ -548,7 +549,7 @@ steps = [
     ("2", "Spend against it", "We run a few Claude Code turns and watch the running total climb toward that ceiling."),
     ("3", "Reach the limit", "The next request is refused with a billing error, showing the circuit breaker in action."),
     ("4", "Raise it and recover", "We lift the cap with a single call, and the very next request succeeds without any redeployment."),
-    ("5", "Show access and visibility", "We demonstrate a tool withheld from one group, then open the dashboard of top spenders."),
+    ("5", "Show access and visibility", "We demonstrate a tool withheld from one group, then open the managed Coding Agent Insights dashboard of top spenders."),
 ]
 y = Inches(2.15)
 for num, h, body in steps:
@@ -585,7 +586,7 @@ rect(s, c2, cy, colw, ch, CARD, line=LINE, line_w=Pt(1), radius=True)
 _, tf = textbox(s, c2 + Inches(0.32), cy + Inches(0.34), colw - Inches(0.64), ch - Inches(0.6))
 add_para(tf, "What the gateway reveals", size=16, color=SKY, bold=True, font=SERIF, first=True, space_after=12)
 for t in ["It attributes cost to each person and team.",
-          "It presents spending and activity in one dashboard.",
+          "It presents usage in a managed dashboard, governance in its own.",
           "It keeps a searchable audit trail of what was done.",
           "It alerts you the moment spending looks unusual."]:
     add_para(tf, "✓   " + t, size=13.5, color=SLATE, font=SANS, space_after=9, line_spacing=1.14)

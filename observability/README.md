@@ -3,23 +3,47 @@
 An **optional** module for orgs that have **no third-party observability platform**
 (Datadog, Splunk, etc.) and want Claude Apps Gateway usage metrics in **CloudWatch**.
 It provisions an ECS Fargate [AWS Distro for OpenTelemetry](https://aws-otel.github.io/)
-(ADOT) collector behind an **internal HTTPS ALB**, exports metrics to CloudWatch via
-the `awsemf` exporter, and ships a ready-made CloudWatch **dashboard**.
+(ADOT) collector behind an **internal HTTPS ALB**, and ships CloudWatch dashboards +
+alarms.
 
 **Toggle:** deploy this stack to turn gateway telemetry on; don't deploy it and the
 gateway runs fine with no telemetry. There is no hard dependency either way.
 
+### Metrics path — `EnableCodingAgentInsights` (default `true`)
+
+**Native / Coding Agent Insights (default).** The collector exports metrics to the
+**native CloudWatch OTLP metrics endpoint** (`https://monitoring.<region>.amazonaws.com/v1/metrics`,
+`otlphttp` + `sigv4auth`). This is a **different CloudWatch data plane** from EMF: the
+metrics are PromQL-queryable and — crucially — auto-populate the **managed
+[Coding Agent Insights](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/coding-agents-claude-code-gateway.html)
+dashboard** (console → GenAI Observability → Coding Agent Insights → Claude Code tab),
+which owns usage/cost/token/adoption/productivity slicing across identity/org
+attributes. This stack then ships a lean **`<stack>-governance`** dashboard for the
+gateway-specific governance/audit views that feature does not provide, and creates the
+cost/usage alarms as **PromQL alarms**.
+
 ```
-gateway (ECS) ──OTLP/HTTPS──▶ collector ALB (443) ──▶ ADOT (4318) ──┬─awsemf───────────▶ CloudWatch metrics (ns: ClaudeGateway)
-                                                                    └─awscloudwatchlogs▶ CloudWatch Logs (/aws/claude-gateway/events)
-                                                                                          ├─ dashboard (metrics + Logs Insights)
-                                                                                          └─ alarms ─▶ SNS topic
+gateway (ECS) ─OTLP/HTTPS─▶ collector ALB (443) ─▶ ADOT (4318) ─┬─otlphttp/cwmetrics─▶ native CloudWatch OTLP metrics ─▶ Coding Agent Insights (managed, PromQL)
+                                                                │                                                   └─ PromQL alarms ─▶ SNS
+                                                                └─awscloudwatchlogs──▶ CloudWatch Logs (/aws/claude-gateway/events)
+                                                                                       └─ <stack>-governance dashboard (Logs Insights)
+```
+
+**Legacy EMF (`EnableCodingAgentInsights=false`).** Falls back to the `awsemf`
+exporter → EMF custom metrics in namespace `ClaudeGateway`, driving the full
+`<stack>-usage` dashboard + classic metric alarms. Use this only if Coding Agent
+Insights isn't available in your region, or you specifically need the EMF namespace.
+
+```
+gateway (ECS) ─OTLP/HTTPS─▶ collector ALB (443) ─▶ ADOT (4318) ─┬─awsemf───────────▶ CloudWatch metrics (ns: ClaudeGateway) ─▶ <stack>-usage dashboard + classic alarms
+                                                                └─awscloudwatchlogs▶ CloudWatch Logs (/aws/claude-gateway/events)
 ```
 
 Metrics are always forwarded when telemetry is on. **Audit events** (governance
 logs — tool decisions, auth, api_request/error) are **opt-in**: set
 `FORWARD_LOGS=true` on the gateway deploy so its telemetry block requests
-`logs: true`. The logs pipeline sits idle and harmless until then.
+`logs: true`. The logs pipeline sits idle and harmless until then. The events
+pipeline is **identical in both metrics modes**.
 
 ## Why HTTPS is mandatory here
 
@@ -41,7 +65,7 @@ gateway image trusts:
 
 | File | Purpose |
 |------|---------|
-| `collector.yaml` | ECS Fargate ADOT collector + internal HTTPS ALB (443→4318) + `awsemf`→CloudWatch + CloudWatch dashboard. Deploys into the gateway VPC. |
+| `collector.yaml` | ECS Fargate ADOT collector + internal HTTPS ALB (443→4318) + metrics export (native OTLP → Coding Agent Insights by default; `awsemf`→EMF in legacy mode) + governance/usage dashboard + alarms. Deploys into the gateway VPC. |
 | `make-collector-cert.sh` | Self-signed cert helper: CA + server cert → ACM, emits `collector-ca.pem` to bake into the gateway image. |
 
 ## Deploy (managed public cert — recommended)
@@ -110,9 +134,13 @@ aws cloudformation deploy --stack-name claude-gateway-collector \
 #    export COLLECTOR_ENDPOINT=https://otel.internal.example.com ; ./deploy.sh
 ```
 
-Once developers run inference through the gateway, metrics land in the
-`ClaudeGateway` CloudWatch namespace and the `claude-gateway-collector-usage`
-dashboard populates.
+Once developers run inference through the gateway, metrics flow to the native
+CloudWatch OTLP endpoint and the managed **Coding Agent Insights** dashboard
+auto-populates (console → GenAI Observability → Coding Agent Insights → Claude
+Code tab). The stack's own `claude-gateway-collector-governance` dashboard covers
+the gateway-specific governance signals. In legacy EMF mode
+(`EnableCodingAgentInsights=false`) metrics land in the `ClaudeGateway` namespace
+and the `claude-gateway-collector-usage` dashboard populates instead.
 
 ## What the gateway emits (OTEL reference)
 
@@ -125,9 +153,12 @@ over the one OTLP/HTTP endpoint: **metrics** (always, when telemetry is on),
 ### Identity & resource attributes (stamped on everything)
 
 These ride on **every** metric and event, added by the gateway from the OIDC token —
-this is what makes governance possible. In the `awsemf` metrics path they become
-CloudWatch **dimensions** (via `resource_to_telemetry_conversion`); in the events
-path they appear under `attributes.*` in the log record.
+this is what makes governance possible. In the native OTLP metrics path they are
+forwarded **unchanged as OTel resource attributes** (Coding Agent Insights slices on
+them; PromQL addresses them as `@resource.user.email`, `@resource.user.groups`, …).
+In legacy EMF mode they become CloudWatch **dimensions** (via
+`resource_to_telemetry_conversion`). In the events path they appear under
+`attributes.*` in the log record.
 
 | Attribute | Source | What it gives you |
 |-----------|--------|-------------------|
@@ -138,11 +169,13 @@ path they appear under `attributes.*` in the log record.
 | `model` | per request | Model attribution on cost/token metrics (e.g. `claude-opus-4-8`) |
 | `session.id` | per CLI session | Session correlation |
 
-> `user.groups` is a **list**. In the metrics path awsemf stringifies the whole
-> array into one dimension value (keys on the group-*set*, not per-group); in the
-> events path Logs Insights can split it with `stats … by attributes.user.groups`.
+> `user.groups` is a **list**. In the native OTLP path it stays an OTel list
+> resource attribute — Coding Agent Insights and PromQL (`@resource.user.groups`)
+> handle it directly. In legacy EMF mode awsemf stringifies the whole array into one
+> dimension value (keys on the group-*set*, not per-group). Either way the events
+> path can split it with `stats … by attributes.user.groups`.
 
-### Metrics (namespace `ClaudeGateway`)
+### Metrics (native OTel names)
 
 | Metric | Unit | Notable attributes | Governance / demo use |
 |--------|------|--------------------|-----------------------|
@@ -155,7 +188,10 @@ path they appear under `attributes.*` in the log record.
 | `claude_code.pull_request.count` | count | — | Productivity |
 | `claude_code.code_edit_tool.decision` | count | `decision` (accept/reject) | **Governance** — edit-tool accept/reject rate + alarm |
 
-Which attributes are promoted to CloudWatch metric **dimensions** is controlled by
+In the native OTLP path these are forwarded verbatim (metric names keep their dots;
+in PromQL: `{"claude_code.cost.usage"}`), and Coding Agent Insights slices them by
+the identity/org resource attributes automatically. In legacy EMF mode, which
+attributes are promoted to CloudWatch metric **dimensions** is controlled by
 `metric_declarations` in `collector.yaml` — see the cardinality note below.
 
 ### Events / audit logs (`FORWARD_LOGS=true` → `/aws/claude-gateway/events`)
@@ -180,31 +216,66 @@ the per-team-spend widget aggregates it and splits the `user.groups` array clean
 > sensitive prompt/response *body* capture. Keep it that way unless you have a reason
 > and the retention/compliance story to match — see **Audit events & governance** below.
 
-## Metrics & dashboard
+## Metrics & dashboards
 
-The dashboard turns the reference above into views. It relies on the gateway-stamped
-resource attributes (`user.email`, `user.id`, `user.groups`) that `awsemf`
-`resource_to_telemetry_conversion` turns into CloudWatch dimensions — no
-header-extraction processors. Sections:
+**Native mode (default) — two dashboards, clear division of labour.**
 
-- **Cost & tokens** — cost by user, cost by team/role (`user.groups`), token split
-  by type (input/output/cache), tokens by model. Metric widgets use `SEARCH()`
-  expressions so they auto-expand across whatever user/team/model values appear.
-- **Adoption & productivity** — sessions, active time, lines of code, commits, PRs.
-- **Governance — tool decisions** — edit-tool accept vs reject, plus API errors.
-- **Governance — audit events (Logs Insights)** — top users by tool rejections,
-  blocked/asked actions by tool, auth outcomes, recent API errors, per-team spend.
+1. **Coding Agent Insights (managed, AWS-owned).** Console → **GenAI Observability →
+   Coding Agent Insights → Claude Code tab** (region `ap-southeast-2`). Auto-populates
+   from the native OTLP metrics — you don't create or import it. Owns
+   **usage / cost / token / adoption / productivity / per-turn-latency** slicing across
+   the identity & org resource attributes (user, team/`user.groups`, org, model) with
+   CSV export. This replaces the hand-built cost/token/adoption metric widgets we used
+   to maintain.
+2. **`<stack>-governance` (this stack).** A lean companion for the gateway-specific
+   **governance/audit** signals Coding Agent Insights does not cover. All widgets are
+   **Logs Insights** / gateway-log queries (they don't depend on the metrics data
+   plane). Widgets:
+   - Header text with a **deep-link** to Coding Agent Insights.
+   - **Top users by tool rejections** and **blocked/asked actions by tool**
+     (`/aws/claude-gateway/events`, `tool_decision`).
+   - **Tool-decision enforcement source** (config vs hook vs user) — showcases the RBAC
+     governance story.
+   - **Authentication events** (gateway log `evt`) and **API errors**
+     (`gateway.api_errors` metric + recent-errors table).
+   - **Per-team spend** from `api_request` audit events, split by `user.groups`.
 
-**Cardinality note (costs real money at scale).** `user.email` / `user.groups` are
+**Legacy EMF mode (`EnableCodingAgentInsights=false`) — the `<stack>-usage` dashboard.**
+The original single dashboard, driven by EMF metrics in the `ClaudeGateway` namespace.
+It relies on the gateway-stamped resource attributes that `awsemf`
+`resource_to_telemetry_conversion` turns into CloudWatch dimensions. Sections: cost &
+tokens (by user/team/model), adoption & productivity, tool decisions, and the same
+Logs Insights governance widgets.
+
+**Cardinality note (legacy EMF only).** In EMF mode `user.email` / `user.groups` are
 promoted to metric dimensions only for `token.usage` / `cost.usage` — each distinct
-value mints a custom metric. For high-cardinality, ad-hoc per-user / per-role
-forensics prefer the **Logs Insights** widgets over `/aws/claude-gateway/events`
-rather than adding more `metric_declarations` dimension sets.
+value mints a custom metric. For high-cardinality, ad-hoc per-user / per-role forensics
+prefer the **Logs Insights** widgets over `/aws/claude-gateway/events` rather than
+adding more `metric_declarations` dimension sets. In native mode this trade-off goes
+away: Coding Agent Insights slices identity/org attributes without minting per-value
+custom metrics, and PromQL queries `sum by (@resource.user.email) (…)` on demand.
 
-**`user.groups` is an OIDC list.** `resource_to_telemetry_conversion` stringifies
-the whole array, so the `[[user.groups]]` metric dimension keys on the entire
-group-*set*, not one value per group. True per-team/per-role slicing is done by the
-Logs Insights `stats … by attributes.user.groups` widgets, which split it cleanly.
+### Viewing Coding Agent Insights
+
+1. Open the CloudWatch console in the collector's region (`ap-southeast-2`) →
+   **GenAI Observability** (left nav) → **Coding Agent Insights** → **Claude Code** tab.
+   The `CodingAgentInsightsConsoleUrl` stack output is a direct deep-link, and the
+   `<stack>-governance` dashboard header repeats it.
+2. It auto-populates a few minutes after metrics start flowing — there is nothing to
+   create or import. If it's empty, confirm metrics are actually reaching the native
+   endpoint: **Metrics → Query with PromQL** (Query Studio) and run
+   `{"claude_code.cost.usage"}` or `sum by (@resource.user.email) ({"claude_code.token.usage"})`.
+   Series there but an empty managed dashboard usually means the metric/attribute
+   shape differs from what the feature expects (check a CLI/gateway version bump).
+3. Slice by user / team (`user.groups`) / model / org, adjust the time range, and use
+   **Export CSV** for reporting. Governance forensics (who was denied what, auth,
+   upstream errors, per-team audit spend) live on the `<stack>-governance` dashboard,
+   not here.
+
+> **Region + availability.** Coding Agent Insights is in all commercial regions
+> except ME (UAE), ME (Bahrain), and Israel (Tel Aviv). If your region isn't
+> supported, deploy with `EnableCodingAgentInsights=false` for the legacy EMF
+> `<stack>-usage` dashboard instead.
 
 ## Audit events & governance (`FORWARD_LOGS=true`)
 
@@ -252,19 +323,35 @@ widgets query them from there.
 ## Alarms
 
 The stack always creates an SNS topic (`<stack>-alarms`, output `AlarmTopicArn`)
-and five starter alarms that publish to it:
+and starter alarms that publish to it. In **native mode** the metric-based alarms
+are **PromQL alarms** (`AWS::CloudWatch::Alarm` → `EvaluationCriteria.PromQLCriteria`);
+the threshold is embedded in the query and the query reduces to a single series.
+`EvaluationInterval` caps at 3600s, so daily windows re-evaluate hourly via
+`sum_over_time(…[1d])`.
 
-| Alarm | Fires when |
-|-------|------------|
-| `<stack>-daily-cost` | total `cost.usage` over 1 day > `DailyCostThresholdUsd` (default 500) |
-| `<stack>-cost-anomaly` | hourly cost leaves its `ANOMALY_DETECTION_BAND` |
-| `<stack>-tool-rejections` | > 25 edit-tool rejections in an hour |
-| `<stack>-api-errors` | > 10 `api_error` events in 5 min (needs `FORWARD_LOGS=true`) |
-| `<stack>-no-sessions` | no sessions for 3 consecutive hours |
+| Alarm | Fires when | PromQL query (native mode) |
+|-------|------------|----------------------------|
+| `<stack>-daily-cost` | total cost over 1 day > `DailyCostThresholdUsd` (default 500) | `sum(sum_over_time({"claude_code.cost.usage"}[1d])) > <thr>` |
+| `<stack>-per-user-cost` | one user's daily cost > `PerUserDailyThresholdUsd` (opt-in) | `sum(sum_over_time({"claude_code.cost.usage", "@resource.user.email"="<addr>"}[1d])) > <thr>` |
+| `<stack>-tool-rejections` | > 25 edit-tool rejections in an hour | `sum(sum_over_time({"claude_code.code_edit_tool.decision", "decision"="reject"}[1h])) > 25` |
+| `<stack>-no-sessions` | no session metric for an hour | `absent_over_time({"claude_code.session.count"}[1h]) == 1` |
+| `<stack>-api-errors` | > 10 `api_error` events in 5 min (needs `FORWARD_LOGS=true`) | *classic* — reads `gateway.api_errors` from the metric filter, unchanged |
+
+Notes:
+- The **no-sessions** alarm uses `absent_over_time(…) == 1`, not `< 1`: an absent
+  series yields no contributor, so a `<` comparison could never fire.
+- **`<stack>-cost-anomaly`** (ANOMALY_DETECTION_BAND) has no PromQL equivalent, so it
+  exists **only in legacy EMF mode**.
+- **`<stack>-api-errors`** is a classic alarm in *both* modes — it reads
+  `gateway.api_errors`, derived by `ApiErrorMetricFilter` from the gateway container
+  log, which is independent of the metrics data plane.
+- In **legacy EMF mode** all of the above are the original classic metric-math alarms
+  (same `AlarmName`s), so exactly one alarm per name exists in either mode.
 
 Set **`AlarmEmail`** to subscribe an address (confirm the SNS email). Leave it
 empty and the topic is created unsubscribed — wire it to Slack/PagerDuty yourself.
-Via `deploy-all.sh`, use `ALARM_EMAIL` / `DAILY_COST_THRESHOLD_USD`.
+Set **`PerUserAlarmEmailAddress`** + **`PerUserDailyThresholdUsd`** to enable the
+per-user cost alarm. Via `deploy-all.sh`, use `ALARM_EMAIL` / `DAILY_COST_THRESHOLD_USD`.
 
 ## Teardown
 

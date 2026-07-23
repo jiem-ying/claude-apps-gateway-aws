@@ -271,33 +271,68 @@ Per-team model allowlists work the same way (`availableModels` and
 
 ---
 
-## Part 3 — Observability: the dashboard
+## Part 3 — Observability: the dashboards
 
 This follows naturally from Part 2: the same contractor whose spend you capped
-and whose tool you denied is now a labelled line in the cost views. Open
-**CloudWatch → Dashboards → `claude-gateway-collector-usage`** and set the time
-picker (top-right) to a window that covers the demo — **the last 1–3 hours** for
-data you just generated, or **1 week** for a fuller history.
+and whose tool you denied is now a labelled line in the cost views. Observability
+lands on **two** dashboards, and it helps to name that split out loud:
 
-- **Cost by user / team / model / agent** — one labeled bar each, totalling over
-  the selected range. `contractor` (`jiemying-target`) shows as its own bar next
-  to `platform` (you). This is the "every number carries a name" attribution
-  story, and it is driven by the metrics stream, which is live and populated.
-- **Token usage by type and model** — the time-series trends.
+1. **Usage / cost / adoption → the managed Coding Agent Insights dashboard.**
+2. **Governance / audit → this stack's own `claude-gateway-collector-governance`
+   dashboard.**
+
+### Usage & cost — Coding Agent Insights (managed, AWS-owned)
+
+The gateway exports its metrics over native OTLP to CloudWatch, which
+auto-populates the managed **GenAI Observability → Coding Agent Insights → Claude
+Code** dashboard (region `ap-southeast-2`). You don't create or import it — it
+appears a few minutes after metrics start flowing. Open the CloudWatch console →
+**GenAI Observability** (left nav) → **Coding Agent Insights** → **Claude Code**
+tab (the `CodingAgentInsightsConsoleUrl` stack output is a direct deep-link, and
+the governance dashboard header repeats it). Set the time picker (top-right) to a
+window that covers the demo — **the last 1–3 hours** for data you just generated,
+or **1 week** for a fuller history.
+
+- **Cost / token usage by user / team (`user.groups`) / model** — `contractor`
+  (`jiemying-target`) slices out next to `platform` (you). This is the "every
+  number carries a name" attribution story; the identity rides on the metrics as
+  OTel resource attributes, so the managed dashboard slices on them automatically.
+- **Adoption / productivity** — sessions, active time, lines of code, commits, PRs.
+- The metrics are also **PromQL-queryable** (Metrics → Query with PromQL):
+  `{"claude_code.cost.usage"}` or
+  `sum by (@resource.user.email) ({"claude_code.token.usage"})`.
+
+> If your region isn't a Coding Agent Insights region, the stack was deployed with
+> `EnableCodingAgentInsights=false` (legacy EMF), and the usage views live on the
+> `claude-gateway-collector-usage` dashboard in the `ClaudeGateway` namespace
+> instead. This deployment runs the **native default**, so demo Coding Agent Insights.
+
+### Governance & audit — `claude-gateway-collector-governance`
+
+Open **CloudWatch → Dashboards → `claude-gateway-collector-governance`**. Its
+widgets are the gateway-specific governance signals Coding Agent Insights does not
+cover — tool accept-vs-reject, top rejections, enforcement source (config vs hook
+vs user), authentication events, API errors, and per-team spend.
 
 > **Audit (events) widgets — know before you demo.** The tool accept-vs-reject,
-> top-rejections, and auth widgets read the `/aws/claude-gateway/events` log, which
-> is separate from the metrics stream. Two things make it easy to over-promise:
+> top-rejections, and per-team-spend widgets read the `/aws/claude-gateway/events`
+> log, which is separate from the metrics stream; the auth and API-error widgets
+> read the gateway container log. Two things make it easy to over-promise:
 > a group tool-deny is enforced by removing the tool from the session (the client
 > never issues a rejected call, so it may not emit a `tool_decision` event at all),
 > and the events pipeline has to be fully wired end to end before anything lands
 > there. Verify the log group has a non-zero `storedBytes` **before** you rely on
 > these widgets in front of an audience — if it is empty, narrate the tool deny
-> from Part 2 instead and keep the dashboard portion on the cost views.
+> from Part 2 instead and keep the dashboard portion on the Coding Agent Insights
+> cost views.
 
-**Alarms** (CloudWatch → Alarms) fire into SNS → email / Slack / PagerDuty:
-daily-cost threshold, cost anomaly, tool-rejection bursts, API errors, plus an
-optional **per-user cost alarm** — the "alert-only" complement to a hard cap
+**Alarms** (CloudWatch → Alarms) fire into SNS → email / Slack / PagerDuty. In the
+native default mode the cost/usage alarms are **PromQL alarms**: daily-cost
+threshold, per-user cost, tool-rejection bursts, and a no-sessions availability
+check. API errors is a classic alarm in both modes (it reads `gateway.api_errors`
+from the gateway container log). The **cost-anomaly** alarm exists **only in legacy
+EMF mode** — there is no PromQL equivalent, so don't promise it on this deployment.
+The optional **per-user cost alarm** is the "alert-only" complement to a hard cap
 (notify when someone spends a lot, without ever blocking them). That SNS topic is
 also a clean hook point for a Lambda that could, say, auto-adjust a cap.
 

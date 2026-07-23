@@ -123,20 +123,29 @@ One propagation quirk worth remembering: policy edits need a gateway redeploy (t
 
 ---
 
-## Observability: metrics vs. Logs Insights
+## Observability: Coding Agent Insights vs. Logs Insights
 
-The bundled ADOT collector exports OTLP events to CloudWatch. Only `user.email` and `user.groups` are promoted to CloudWatch EMF metric **dimensions** on `token.usage` and `cost.usage` events. Every distinct dimension value creates a new custom metric, and CloudWatch charges per metric. So: keep dimensions low-cardinality.
+The bundled ADOT collector forwards the gateway's metrics over **native OTLP** to CloudWatch (the `monitoring.<region>.amazonaws.com/v1/metrics` endpoint, signed with SigV4). This is a different CloudWatch data plane from the old EMF custom-metrics path: the metrics keep their dotted OTel names (`claude_code.cost.usage`), the gateway-stamped identity rides along as OTel **resource attributes** (`@resource.user.email`, `@resource.user.groups`), and — the payoff — they auto-populate the managed **GenAI Observability → Coding Agent Insights → Claude Code** dashboard. Cost, tokens, and adoption sliced by user, team, and model, with nothing to build or import.
 
-High-cardinality slicing — per-user spend breakdowns, per-role analysis — is done in **CloudWatch Logs Insights** over `/aws/claude-gateway/events`. Logs Insights is billed per GB scanned, which is orders of magnitude cheaper for ad-hoc queries.
+Because the attributes stay as resource attributes rather than being minted into per-value custom metrics, there's no cardinality trade-off to manage and no per-metric charge for slicing by user. You query on demand in **PromQL**:
 
 ```
-CloudWatch Metrics  → "what is team A spending per day?"  (dashboard, alarms)
-Logs Insights       → "which user spiked spend on Tuesday?"  (ad-hoc)
+{"claude_code.cost.usage"}
+sum by (@resource.user.email) ({"claude_code.token.usage"})
+```
+
+Governance and audit — who was denied a tool, whose sign-in failed, per-team spend from the raw request events — live in **CloudWatch Logs Insights** over `/aws/claude-gateway/events`, surfaced on the stack's own lean governance dashboard. Logs Insights is billed per GB scanned, which is cheap for ad-hoc forensics.
+
+```
+Coding Agent Insights  → "what is team A spending per day?"  (managed, PromQL)
+Logs Insights          → "who was denied WebFetch on Tuesday?"  (governance dashboard)
 ```
 
 Enable log forwarding with `FORWARD_LOGS=true`. It's off by default; metrics-only is the default.
 
-The bundled CloudWatch dashboard puts that Logs Insights query to work directly: one bar chart each for cost by user, by team, by model, and by agent, totalled over whatever time window you're looking at. That replaced an earlier version built on fixed one-day metric widgets, which had a habit of clumping everyone's spend into a single indistinguishable bar — useful for noticing *that* spend happened, useless for figuring out *whose*. There's also an optional per-user daily-cost alarm (set `PerUserAlarmEmailAddress` on the observability stack) that fires its own SNS topic. It's notify-only today, but it's a clean hook if you later want to wire an automated response to it.
+The cost alarms are **PromQL alarms** in this mode — daily cost, an optional per-user daily-cost alarm (set `PerUserAlarmEmailAddress` on the observability stack), a tool-rejection burst, and a no-sessions availability check — each firing its own SNS topic. They're notify-only today, but that topic is a clean hook if you later want to wire an automated response.
+
+> If Coding Agent Insights isn't available in your region, deploy the collector with `EnableCodingAgentInsights=false` for the legacy path: `awsemf` promotes `user.email` and `user.groups` to EMF metric **dimensions** on `token.usage`/`cost.usage` (each distinct value mints a custom metric, so keep dimensions low-cardinality), drives a hand-built `-usage` dashboard, and uses classic metric alarms plus a cost-anomaly band. The events/audit pipeline is identical either way.
 
 ---
 

@@ -106,13 +106,28 @@ running:
   more with telemetry/managed blocks); the model allowlist has the most headroom to
   grow. `FORWARD_LOGS=true` adds `logs: true` (~13 bytes); the managed block adds a
   bit more. `deploy.sh` now hard-fails the deploy if the rendered config is ≥ 4096 bytes.
-- **Observability cardinality: metrics vs. Logs Insights.** In `collector.yaml`,
-  only `user.email`/`user.groups` on `token.usage`/`cost.usage` are promoted to
-  metric dimensions (each distinct value = a custom metric = $). High-cardinality
-  per-user/per-role slicing is done by CloudWatch Logs Insights over
-  `/aws/claude-gateway/events`, not by adding more `metric_declarations`. Also
-  `user.groups` is an OIDC list that awsemf stringifies → the metric dimension
-  keys on the whole group-set; per-group splitting is a Logs Insights job.
+- **Observability metrics data plane: native OTLP → Coding Agent Insights (default).**
+  `collector.yaml` has an `EnableCodingAgentInsights` toggle (default `true`;
+  `deploy-all.sh` env `ENABLE_CODING_AGENT_INSIGHTS`). **Native mode:** the collector
+  exports metrics to the native CloudWatch OTLP endpoint
+  (`https://monitoring.${AWS::Region}.amazonaws.com/v1/metrics`, `otlphttp` + `sigv4auth`,
+  needs only `cloudwatch:PutMetricData` — TaskRole already has it). This is a *different*
+  data plane from EMF: metrics are PromQL-queryable (metric names keep dots
+  `{"claude_code.cost.usage"}`; resource attrs are `@resource.user.email` etc.) and
+  auto-populate the managed **GenAI Observability → Coding Agent Insights → Claude Code**
+  dashboard (owns usage/cost/token/adoption/productivity). The stack's own dashboard is
+  then **governance/audit-only** (`<stack>-governance`, Logs Insights widgets), and the
+  cost/usage **alarms are PromQL alarms** (`EvaluationCriteria.PromQLCriteria`;
+  `EvaluationInterval` caps at 3600s so daily windows use `sum_over_time(…[1d])`;
+  no-session uses `absent_over_time(…) == 1` since an absent series has no contributor).
+  `<stack>-api-errors` stays a classic alarm (reads `gateway.api_errors` from the metric
+  filter, both modes). **Legacy EMF mode** (`false`): the old `awsemf` path — EMF custom
+  metrics in namespace `ClaudeGateway`, `<stack>-usage` dashboard, classic alarms, and
+  the `metric_declarations` cardinality trade-off (only `user.email`/`user.groups` on
+  `token.usage`/`cost.usage` promoted to dimensions; `awsemf` stringifies the
+  `user.groups` list into one dimension value → per-group splitting is a Logs Insights
+  job). Native mode avoids that trade-off entirely. Both configs live in two
+  mutually-exclusive SSM params selected by `!If` into `AOT_CONFIG_CONTENT`.
 - **Model IDs must match what the CLI sends.** The current allowlist covers
   fully-qualified `global.anthropic.*` (opus-4-6/7/8, sonnet-4-6, sonnet-5,
   haiku-4-5, fable-5) AND short aliases (`claude-opus-4-8`, `claude-sonnet-5`,

@@ -262,6 +262,18 @@ developer-side config. Key points for AWS:
   dashboard's Logs Insights + governance alarms. `traces` stays off (out of scope).
   The rendered config must still fit the 4096-byte task-def budget (~3000 used;
   `logs: true` adds ~13 bytes).
+- **Metrics data plane — `ENABLE_CODING_AGENT_INSIGHTS` (default `true`).** This is a
+  **collector-side** toggle (a `deploy-all.sh` env var → the collector stack's
+  `EnableCodingAgentInsights` param), not part of the gateway telemetry block above.
+  When `true`, the bundled collector exports metrics to the **native CloudWatch OTLP
+  endpoint** so the managed **GenAI Observability → Coding Agent Insights** dashboard
+  auto-populates (usage/cost/token/adoption/productivity, PromQL-queryable), and the
+  stack's own dashboard shrinks to a governance/audit companion (`<stack>-governance`)
+  with **PromQL alarms**. Set `false` for the legacy `awsemf`/EMF path (namespace
+  `ClaudeGateway`, `<stack>-usage` dashboard, classic metric alarms) — use only if
+  Coding Agent Insights isn't available in your region. Either way the events/audit
+  pipeline (`FORWARD_LOGS`) is identical. Full detail in
+  [`observability/README.md`](../observability/README.md).
 
 ## Spend caps (optional — hard enforcement)
 

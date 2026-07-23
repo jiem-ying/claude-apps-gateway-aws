@@ -20,6 +20,8 @@
 #   COGNITO_ADMIN_EMAIL        (required if IDP_MODE=new-cognito)
 #   COGNITO_DOMAIN_PREFIX      (required if IDP_MODE=new-cognito; globally unique)
 #   ENABLE_COLLECTOR           "true" | "false"                             (default: false)
+#   ENABLE_CODING_AGENT_INSIGHTS "true" | "false"  native OTLP metrics ->    (default: true)
+#                              managed Coding Agent Insights + PromQL alarms; false = legacy awsemf
 #   ENABLE_VPN                 "true" | "false"                             (default: false)
 #   BUILD_IMAGE                "true" | "false"                             (default: false — reuse)
 #   FORWARD_LOGS               "true" | "false"  forward audit events too   (default: ENABLE_COLLECTOR)
@@ -38,6 +40,7 @@ set -euo pipefail
 # ---- toggles -----------------------------------------------------------------
 IDP_MODE="${IDP_MODE:-byo}"
 ENABLE_COLLECTOR="${ENABLE_COLLECTOR:-false}"
+ENABLE_CODING_AGENT_INSIGHTS="${ENABLE_CODING_AGENT_INSIGHTS:-true}"
 ENABLE_VPN="${ENABLE_VPN:-false}"
 BUILD_IMAGE="${BUILD_IMAGE:-false}"
 # When we stand up the bundled collector, default to forwarding audit events too
@@ -160,6 +163,7 @@ if [[ "$ENABLE_COLLECTOR" == "true" ]]; then
       "PublicHostedZoneId=$PUBLIC_HOSTED_ZONE_ID" \
       "DomainName=$COLLECTOR_HOST" \
       "VpcCidr=$VPC_CIDR_OUT" \
+      "EnableCodingAgentInsights=${ENABLE_CODING_AGENT_INSIGHTS}" \
       "AlarmEmail=${ALARM_EMAIL:-}" \
       "DailyCostThresholdUsd=${DAILY_COST_THRESHOLD_USD:-500}" \
       "PerUserAlarmEmailAddress=${PER_USER_ALARM_EMAIL:-}" \
@@ -226,6 +230,7 @@ cat <<EOF
   Gateway URL     : $GATEWAY_URL
   Cognito stack   : $([[ "$IDP_MODE" == "byo" ]] && echo "(BYO — you provided OIDC vars)" || echo "$COGNITO_STACK ($IDP_MODE)")
   Collector       : $([[ "$ENABLE_COLLECTOR" == "true" ]] && echo "$COLLECTOR_URL (bundled, managed ACM)" || echo "(off or BYO — set COLLECTOR_ENDPOINT next time)")
+  Metrics path     : $([[ "$ENABLE_COLLECTOR" != "true" ]] && echo "(n/a — no bundled collector)" || { [[ "$ENABLE_CODING_AGENT_INSIGHTS" == "true" ]] && echo "native OTLP -> Coding Agent Insights (console: GenAI Observability -> Coding Agent Insights -> Claude Code) + $COLLECTOR_STACK-governance dashboard" || echo "legacy awsemf/EMF -> $COLLECTOR_STACK-usage dashboard"; })
   Client VPN      : $([[ "$ENABLE_VPN" == "true" ]] && echo "$OVPN_PATH  (import into AWS VPN Client)" || echo "(bring your own network)")
 
 Next steps for developers:

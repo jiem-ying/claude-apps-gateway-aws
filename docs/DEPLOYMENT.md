@@ -28,6 +28,11 @@ set in production** and how to push a change safely.
 - **IdP:** new Cognito — issuer `…/ap-southeast-2_YpOBNdHPj`, client `2m67v9h3427rbjr25fjiq3t6if`,
   `AllowedEmailDomains=amazon.com`, `GroupsClaim=cognito:groups`.
 - **Telemetry:** ON → `CollectorEndpoint=https://claude-otel.jiemying.people.aws.dev`, metrics + logs.
+  Collector runs the **native default** (`EnableCodingAgentInsights=true`) — metrics go over
+  native OTLP to CloudWatch and auto-populate the managed **GenAI Observability → Coding Agent
+  Insights → Claude Code** dashboard (`ap-southeast-2` is a supported region); the stack also
+  ships the `claude-gateway-collector-governance` dashboard for governance/audit. Cost/usage
+  alarms are PromQL alarms.
 - **Spend caps:** ON (`EnableSpendCaps=true`, `AdminWriteKeyArn=…claude-gateway-admin-write-*`,
   fail-open). Caps themselves are set via the Admin API, not the stack.
 - **ALB idle timeout:** 4000s. **Min/Max tasks:** 2 / 10.
